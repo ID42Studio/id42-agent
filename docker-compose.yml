@@ -1,0 +1,102 @@
+# id42-agent phase 1.
+# Runtime: HKUDS/nanobot v0.4.2 at 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65.
+# There is no official published image. Compose builds the upstream Dockerfile.
+# nanobot is MIT licensed. This repository's own files are Apache-2.0.
+# See NOTICE.
+
+name: id42-agent
+
+x-nanobot: &nanobot
+  image: id42-agent-nanobot:0.4.2
+  pull_policy: never
+  build:
+    context: https://github.com/HKUDS/nanobot.git#0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
+    dockerfile: Dockerfile
+    args:
+      # Upstream default is whatsapp (Dockerfile ARG NANOBOT_CHANNELS).
+      NANOBOT_CHANNELS: telegram
+  environment:
+    TZ: ${TZ:-America/Sao_Paulo}
+    NANOBOT_DOCKER_BOOTSTRAP: "1"
+    NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
+  volumes:
+    - nanobot-data:/home/nanobot/.nanobot
+    - ./docker/entrypoint.sh:/id42/entrypoint.sh:ro
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  entrypoint: ["/bin/sh", "/id42/entrypoint.sh"]
+  # Upstream entrypoint starts as root, chowns the data dir, then setpriv
+  # drops to uid 1000. Those three capabilities are the ones that entrypoint
+  # uses (upstream docker-compose.yml cap_add). Nothing else is added.
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - SETGID
+    - SETUID
+  security_opt:
+    - no-new-privileges:true
+  labels:
+    - org.opencontainers.image.title=id42-agent
+    - org.opencontainers.image.description=Personal nanobot gateway pinned to HKUDS/nanobot v0.4.2
+    - org.opencontainers.image.revision=0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
+    - org.opencontainers.image.source=https://github.com/HKUDS/nanobot
+    - org.opencontainers.image.licenses=MIT
+
+services:
+  nanobot-gateway:
+    <<: *nanobot
+    command: ["gateway"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+      - "127.0.0.1:18790:18790"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:18790/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  nanobot-cli:
+    <<: *nanobot
+    profiles:
+      - cli
+    command: ["status"]
+    stdin_open: true
+    tty: true
+    restart: "no"
+
+  # Opt-in local Ollama. The default is an existing server on the host.
+  # Enable with: docker compose --profile ollama up -d
+  # Then set OLLAMA_BASE_URL=http://ollama:11434/v1 before the first init.
+  ollama:
+    profiles:
+      - ollama
+    image: ollama/ollama:0.40.18@sha256:1cabd20e1762a7a8444bf4a7110b346d923cd77ab6c97c984434140638c913ec
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 8G
+
+volumes:
+  nanobot-data:
+  ollama-data:
