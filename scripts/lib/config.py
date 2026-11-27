@@ -33,6 +33,7 @@ ENV_KEYS = (
 
 # Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
 _FACTORY_RE = re.compile(r"\A[A-Za-z_][\w.]*:[A-Za-z_]\w*\Z")
+# Durable factory. id42_agent.mcp_stub:server is the empty in-memory factory.
 _DEFAULT_WORK_FACTORY = "id42_agent.mcp_host:server"
 _WORK_TOOL_TIMEOUT = 120
 _IMAGE_PYTHONPATH = "/opt/id42-agent"
@@ -248,12 +249,12 @@ def mcp_server_errors(server: object) -> list[str]:
     pythonpath = ""
     if isinstance(extra_env, dict):
         pythonpath = extra_env.get("PYTHONPATH", "")
-    if factory == _DEFAULT_WORK_FACTORY and (
+    if isinstance(factory, str) and factory.startswith("id42_agent.") and (
         not isinstance(pythonpath, str) or _IMAGE_PYTHONPATH not in pythonpath.split(":")
     ):
         errors.append(
             f"{label}.env.PYTHONPATH must include {_IMAGE_PYTHONPATH} "
-            "so the default factory can be imported"
+            "so the image factory can be imported"
         )
     if isinstance(pythonpath, str) and pythonpath:
         for part in pythonpath.split(":"):

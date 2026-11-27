@@ -44,6 +44,8 @@ cases = [
     ("/root/.ssh", "/tmp/ssh", True),
     ("/var/run/docker.sock", "/var/run/docker.sock", True),
     ("/var/lib/docker/volumes/nanobot-data/_data", "/home/nanobot/.nanobot", False),
+    ("/var/lib/docker/volumes/id42-work-data/_data", "/var/lib/id42-work", False),
+    ("/home/marcel/id42-work", "/var/lib/id42-work", True),
 ]
 failed = False
 for source, dest, expect in cases:
@@ -73,6 +75,10 @@ compliant = {
         {
             "Source": "/home/runner/work/id42-agent/id42-agent/docker/entrypoint.sh",
             "Destination": "/id42/entrypoint.sh",
+        },
+        {
+            "Source": "/var/lib/docker/volumes/id42-work-data/_data",
+            "Destination": "/var/lib/id42-work",
         },
     ],
 }
@@ -248,6 +254,48 @@ assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
 print("default factory PYTHONPATH is the image module path")
 PY
 
+cat >"$WORKDIR/custom-factory.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=myapp.governed:server
+ID42_WORK_PYTHONPATH=
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+python3 "$CONFIG_PY" render --env-file "$WORKDIR/custom-factory.env" \
+  --output "$WORKDIR/custom-factory.json" >"$WORKDIR/custom-factory-stdout"
+python3 - "$WORKDIR/custom-factory.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+server = doc["tools"]["mcpServers"]["id42-work"]
+assert server["args"] == ["mcp", "serve", "--factory", "myapp.governed:server"]
+assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
+print("custom factory override is preserved")
+PY
+
+cat >"$WORKDIR/stub-factory.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=id42_agent.mcp_stub:server
+ID42_WORK_PYTHONPATH=
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+python3 "$CONFIG_PY" render --env-file "$WORKDIR/stub-factory.env" \
+  --output "$WORKDIR/stub-factory.json" >"$WORKDIR/stub-factory-stdout"
+python3 - "$WORKDIR/stub-factory.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+server = doc["tools"]["mcpServers"]["id42-work"]
+assert server["args"] == ["mcp", "serve", "--factory", "id42_agent.mcp_stub:server"]
+assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
+print("stub factory override is preserved")
+PY
+
 echo "== compose config =="
 COMPOSE_PROJECT_NAME=$PROJECT docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" config >/dev/null
 
@@ -298,33 +346,47 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
   nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/mcp-probe"
+sed -i 's/\r$//' "$WORKDIR/mcp-probe"
 grep -q "mcp-stdio-ok" "$WORKDIR/mcp-probe"
+grep -qx "works=echo,note,note.list" "$WORKDIR/mcp-probe"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  -e ID42_MCP_FACTORY=id42_agent.mcp_stub:server \
+  nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/mcp-stub"
+sed -i 's/\r$//' "$WORKDIR/mcp-stub"
+grep -q "mcp-stdio-ok" "$WORKDIR/mcp-stub"
+grep -qx "works=" "$WORKDIR/mcp-stub"
+
+wait_gateway() {
+  local ready=0
+  local _
+  for _ in $(seq 1 60); do
+    code=$(curl --silent --output "$WORKDIR/health.json" --write-out "%{http_code}" --max-time 5 http://127.0.0.1:18790/health || true)
+    if [[ "$code" == "200" ]] && python3 - "$WORKDIR/health.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+raise SystemExit(0 if payload.get("ready") is True and payload.get("status") == "ok" else 1)
+PY
+    then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$ready" != "1" ]]; then
+    ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+      docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" logs >"$LOG" || true
+    tail -n 80 "$LOG" >&2 || true
+    id42_die "gateway did not become ready on /health"
+  fi
+}
 
 echo "== start gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" up -d nanobot-gateway
 
-ready=0
-for _ in $(seq 1 60); do
-  code=$(curl --silent --output "$WORKDIR/health.json" --write-out "%{http_code}" --max-time 5 http://127.0.0.1:18790/health || true)
-  if [[ "$code" == "200" ]] && python3 - "$WORKDIR/health.json" <<'PY'
-import json, sys
-payload = json.load(open(sys.argv[1]))
-raise SystemExit(0 if payload.get("ready") is True and payload.get("status") == "ok" else 1)
-PY
-  then
-    ready=1
-    break
-  fi
-  sleep 5
-done
-
-if [[ "$ready" != "1" ]]; then
-  ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
-    docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" logs >"$LOG" || true
-  tail -n 80 "$LOG" >&2 || true
-  id42_die "gateway did not become ready on /health"
-fi
+wait_gateway
 echo "OK health endpoint is ready"
 
 container=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
@@ -369,6 +431,27 @@ if [[ "$healthy" != "1" ]]; then
 fi
 echo "OK compose healthcheck is healthy"
 
+echo "== id42-work store survives a container restart =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  nanobot-gateway - persist-start <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/persist-start.out"
+echo_id=$(awk -F= '/^execution_id=/{print $2}' "$WORKDIR/persist-start.out")
+note_id=$(awk -F= '/^note_execution_id=/{print $2}' "$WORKDIR/persist-start.out")
+note_status=$(awk -F= '/^note_status=/{print $2}' "$WORKDIR/persist-start.out")
+[[ -n "$echo_id" && -n "$note_id" && "$note_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "persist-start did not report an echo id and a waiting note"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" restart nanobot-gateway
+wait_gateway
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  nanobot-gateway - persist-check "$echo_id" "$note_id" <"$ROOT/scripts/lib/mcp_probe.py" \
+  | tee "$WORKDIR/persist-check.out"
+grep -q "persist-ok" "$WORKDIR/persist-check.out"
+echo "OK id42-work executions are still listed after a gateway restart"
+
 echo "== doctor security baseline on the running gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
@@ -387,6 +470,14 @@ fi
 if ! grep -q "OK: id42-work config is stdio-only" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work config"
+fi
+if ! grep -q "OK: id42-work store is writable, mounted, and opens SQLite" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work store"
+fi
+if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the default works"
 fi
 echo "OK doctor accepts the running gateway baseline"
 

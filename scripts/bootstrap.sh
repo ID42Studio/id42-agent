@@ -43,6 +43,10 @@ state=$(
     --entrypoint /bin/sh nanobot-gateway \
     -c 'set -eu
 chown nanobot:nanobot /home/nanobot/.nanobot
+if [ -d /var/lib/id42-work ]; then
+  chmod 700 /var/lib/id42-work 2>/dev/null || true
+  chown nanobot:nanobot /var/lib/id42-work
+fi
 if [ -f /home/nanobot/.nanobot/config.json ]; then echo id42-state=present; else echo id42-state=missing; fi' \
     | sed -n 's/^id42-state=//p' \
     | tail -n 1

@@ -8,6 +8,6 @@ from the workspace directory.
 - Long-term memory belongs in `memory/MEMORY.md`, which nanobot creates.
 - Shell execution is off in the id42-agent default (`tools.exec.enable` is false). Do not assume a shell is available.
 - Stay inside this workspace when using file tools.
-- When `tools.mcpServers.id42-work` is configured, governed execution goes through that server. The default factory registers no works. There is no approve or reject tool. A waiting approval stays waiting until a person decides outside the server.
+- When `tools.mcpServers.id42-work` is configured, governed execution goes through that server. The default factory registers `echo` (returns the input, no approval), `note.list` (reads stored notes, no approval), and `note` (appends one note outside this workspace and waits for approval). There is no approve or reject tool. A waiting approval stays waiting until a person decides outside the server. `note` needs an `idempotency_key`.
 
 Edit this file in the WebUI or in the data volume. A later `make init` does not overwrite it.

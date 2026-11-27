@@ -5,6 +5,10 @@ capability except CHOWN, SETGID, and SETUID, sets no-new-privileges, and
 does not mount the Docker socket or a host home directory. The read-only
 entrypoint script is the one allowed bind from a checkout, including when
 that checkout lives under /home (GitHub runners and typical developer clones).
+
+Named volumes are not host home directories. nanobot-data is mounted at
+/home/nanobot/.nanobot. id42-work-data is mounted at /var/lib/id42-work,
+outside the agent workspace and outside any home directory.
 """
 
 from __future__ import annotations
@@ -45,8 +49,9 @@ def mount_errors(source: str, destination: str) -> list[str]:
     if destination in {"/home", "/root", "/home/nanobot"}:
         errors.append(f"home directory is mounted ({source} -> {destination})")
         return errors
-    # The named volume is mounted at /home/nanobot/.nanobot inside the
-    # container. Its source is a Docker volume path, not a host home.
+    # Named volumes are mounted inside the container. Their source is a
+    # Docker volume path, not a host home: nanobot-data at
+    # /home/nanobot/.nanobot, id42-work-data at /var/lib/id42-work.
     # Reject a bind of the host home (or anything under it) except the
     # single read-only entrypoint script.
     if _host_home(source):
