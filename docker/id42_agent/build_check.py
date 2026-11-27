@@ -6,12 +6,20 @@ Runs once while the image is built, then the Dockerfile removes this file.
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 from uuid import uuid4
 
 import id42_agent.mcp_host as host
 import id42_agent.mcp_stub as stub
-from id42_work import ActorAuthority, CapabilityCall, ReconciliationVerdict
+from id42_work import (
+    ActorAuthority,
+    AuthorityKeyError,
+    CapabilityCall,
+    ReconciliationVerdict,
+    TrustedActor,
+)
 
 
 def _call(operation: object) -> CapabilityCall:
@@ -24,8 +32,44 @@ def _call(operation: object) -> CapabilityCall:
     )
 
 
+def _check_authority_key(server: object) -> None:
+    """The image build must refuse a loose key file and must not keep the key."""
+    key = host.authority_key_file()
+    info = key.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SystemExit("authority key file is not a regular file")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit(f"authority key mode is {stat.S_IMODE(info.st_mode):03o}")
+    authority = getattr(server, "authority", None)
+    issue = getattr(server, "host_actor", None)
+    if authority is None or not callable(issue):
+        raise SystemExit("factory did not expose the authority")
+    credential = issue().to_credential()
+    try:
+        reloaded = ActorAuthority(host.AUTHORITY_ID, key_path=key)
+        verified = reloaded.verify(TrustedActor.from_credential(credential))
+    finally:
+        del credential
+    if verified.actor_id != host.ACTOR_ID:
+        raise SystemExit("reloaded authority rejected the host actor")
+    os.chmod(key, 0o644)
+    try:
+        ActorAuthority(host.AUTHORITY_ID, key_path=key)
+    except AuthorityKeyError as exc:
+        if exc.reason != "permissions":
+            raise SystemExit(f"loose authority key failed as {exc.reason}") from exc
+    else:
+        raise SystemExit("loose authority key was accepted")
+    finally:
+        # Later calls in this process reload the file. Put the mode back.
+        # main() deletes the file so the image layer does not contain key bytes.
+        if key.exists():
+            os.chmod(key, 0o600)
+
+
 def main() -> None:
     server = host.server()
+    _check_authority_key(server)
     listed = asyncio.run(server.list_works())
     ids = sorted(item["id"] for item in listed["works"])
     if ids != sorted(host.DEFAULT_WORK_IDS):
@@ -70,6 +114,8 @@ def main() -> None:
     unreadable = asyncio.run(host.NoteStore(blocked).reconcile(_call(operation)))
     if unreadable.verdict is not ReconciliationVerdict.UNKNOWN:
         raise SystemExit(f"unreadable file reconciled as {unreadable.verdict}")
+    host.DEFAULT_AUTHORITY_KEY.unlink(missing_ok=True)
+    Path(str(host.DEFAULT_AUTHORITY_KEY) + ".lock").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

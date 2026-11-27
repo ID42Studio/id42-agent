@@ -175,6 +175,28 @@ NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
 EOF
 expect_fail "relative pythonpath" python3 "$CONFIG_PY" render --env-file "$WORKDIR/bad-pythonpath.env" --output "$WORKDIR/bad-pythonpath.json"
 
+cat >"$WORKDIR/relative-key.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_AUTHORITY_KEY_PATH=keys/authority.key
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "relative authority key" python3 "$CONFIG_PY" render --env-file "$WORKDIR/relative-key.env" --output "$WORKDIR/relative-key.json"
+
+cat >"$WORKDIR/home-key.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_AUTHORITY_KEY_PATH=/home/nanobot/authority.key
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "authority key under home" python3 "$CONFIG_PY" render --env-file "$WORKDIR/home-key.env" --output "$WORKDIR/home-key.json"
+
 cat >"$ENV_FILE" <<'EOF'
 TZ=America/Sao_Paulo
 OLLAMA_BASE_URL=http://host.docker.internal:9/v1
@@ -228,6 +250,7 @@ assert server["command"] == "id42-work"
 assert server["args"] == ["mcp", "serve", "--factory", "id42_agent.mcp_host:server"]
 assert server["toolTimeout"] == 120
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent:/srv/id42-work-host"
+assert "ID42_WORK_AUTHORITY_KEY_PATH" not in server["env"]
 assert "url" not in server
 assert "--http" not in server["args"]
 assert "ssrfWhitelist" not in doc["tools"]
@@ -251,6 +274,7 @@ import json, sys
 doc = json.load(open(sys.argv[1]))
 server = doc["tools"]["mcpServers"]["id42-work"]
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
+assert "ID42_WORK_AUTHORITY_KEY_PATH" not in server["env"]
 print("default factory PYTHONPATH is the image module path")
 PY
 
@@ -294,6 +318,31 @@ server = doc["tools"]["mcpServers"]["id42-work"]
 assert server["args"] == ["mcp", "serve", "--factory", "id42_agent.mcp_stub:server"]
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
 print("stub factory override is preserved")
+PY
+
+cat >"$WORKDIR/authority-key.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=
+ID42_WORK_PYTHONPATH=
+ID42_WORK_AUTHORITY_KEY_PATH=/var/lib/id42-work/keys/authority.key
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+python3 "$CONFIG_PY" render --env-file "$WORKDIR/authority-key.env" \
+  --output "$WORKDIR/authority-key.json" >"$WORKDIR/authority-key-stdout"
+if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/authority-key-stdout"; then
+  id42_die "render printed the web token"
+fi
+python3 - "$WORKDIR/authority-key.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+server = doc["tools"]["mcpServers"]["id42-work"]
+assert server["env"]["ID42_WORK_AUTHORITY_KEY_PATH"] == "/var/lib/id42-work/keys/authority.key"
+assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
+print("authority key path is passed to the MCP child")
 PY
 
 echo "== compose config =="
@@ -641,6 +690,113 @@ grep -qx "status=COMPLETED" "$WORKDIR/wrapper-status.out" \
   || id42_die "wrapper-approved note is not COMPLETED in the store"
 echo "OK id42-work approvals list, approve --resume, and reject"
 
+echo "== authority key survives an MCP host restart =="
+authority_cmd() {
+  gateway_run --entrypoint /opt/id42-work/venv/bin/python \
+    -e "PYTHONPATH=/opt/id42-agent" \
+    nanobot-gateway - "$@" <"$ROOT/scripts/lib/authority_restart.py"
+}
+
+auth_field() {
+  awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$2"
+}
+
+probe_cmd start-note "smoke-authority-note" "smoke-authority" | tee "$WORKDIR/authority-start.out"
+sed -i 's/\r$//' "$WORKDIR/authority-start.out"
+authority_exec=$(auth_field execution_id "$WORKDIR/authority-start.out")
+authority_status=$(auth_field status "$WORKDIR/authority-start.out")
+[[ -n "$authority_exec" && "$authority_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "authority-key note did not wait for approval"
+
+authority_cmd seal "$authority_exec" | tee "$WORKDIR/authority-seal.out"
+sed -i 's/\r$//' "$WORKDIR/authority-seal.out"
+if grep -q 'id42a1\.' "$WORKDIR/authority-seal.out"; then
+  id42_die "seal printed an actor credential"
+fi
+grep -qx "sealed" "$WORKDIR/authority-seal.out" || id42_die "operator seal was not stored"
+[[ "$(auth_field execution_status "$WORKDIR/authority-seal.out")" == "COMPLETED" ]] \
+  || id42_die "operator approval did not resume to COMPLETED"
+[[ "$(auth_field decision_actor_id "$WORKDIR/authority-seal.out")" == "id42-operator" ]] \
+  || id42_die "operator approval did not record id42-operator"
+[[ "$(auth_field key_mode "$WORKDIR/authority-seal.out")" == "600" ]] \
+  || id42_die "authority key file was not created mode 0600"
+seal_key=$(auth_field signing_key_id "$WORKDIR/authority-seal.out")
+[[ "$seal_key" =~ ^[0-9a-f]{16}$ ]] || id42_die "signing key id was not printed"
+authority_approval=$(auth_field approval_id "$WORKDIR/authority-seal.out")
+[[ -n "$authority_approval" ]] || id42_die "seal did not print an approval id"
+
+probe_cmd execution-status "$authority_exec" | tee "$WORKDIR/authority-restart.out"
+sed -i 's/\r$//' "$WORKDIR/authority-restart.out"
+grep -qx "status=COMPLETED" "$WORKDIR/authority-restart.out" \
+  || id42_die "restarted MCP host did not keep the approved note"
+
+authority_cmd verify "$authority_approval" | tee "$WORKDIR/authority-verify.out"
+sed -i 's/\r$//' "$WORKDIR/authority-verify.out"
+if grep -q 'id42a1\.' "$WORKDIR/authority-verify.out"; then
+  id42_die "verify printed an actor credential"
+fi
+grep -qx "verified" "$WORKDIR/authority-verify.out" \
+  || id42_die "operator seal did not verify in a new process"
+[[ "$(auth_field signing_key_id "$WORKDIR/authority-verify.out")" == "$seal_key" ]] \
+  || id42_die "a new process loaded a different authority key"
+[[ "$(auth_field approval_status "$WORKDIR/authority-verify.out")" == "GRANTED" ]] \
+  || id42_die "stored approval was not granted"
+[[ "$(auth_field decision_actor_id "$WORKDIR/authority-verify.out")" == "id42-operator" ]] \
+  || id42_die "verified operator does not match the stored decision"
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-rotate-key.sh" | tee "$WORKDIR/authority-rotate.out"
+sed -i 's/\r$//' "$WORKDIR/authority-rotate.out"
+if grep -q 'id42a1\.' "$WORKDIR/authority-rotate.out"; then
+  id42_die "rotation printed an actor credential"
+fi
+rotated_key=$(auth_field signing_key_id "$WORKDIR/authority-rotate.out")
+[[ "$rotated_key" =~ ^[0-9a-f]{16}$ ]] || id42_die "rotation did not print a key id"
+[[ "$rotated_key" != "$seal_key" ]] || id42_die "rotation kept the same signing key id"
+
+authority_cmd verify "$authority_approval" | tee "$WORKDIR/authority-verify-rotated.out"
+sed -i 's/\r$//' "$WORKDIR/authority-verify-rotated.out"
+grep -qx "verified" "$WORKDIR/authority-verify-rotated.out" \
+  || id42_die "operator seal did not verify after key rotation"
+[[ "$(auth_field signing_key_id "$WORKDIR/authority-verify-rotated.out")" == "$rotated_key" ]] \
+  || id42_die "rotated key id did not load in the next process"
+authority_cmd wipe | tee "$WORKDIR/authority-wipe.out"
+sed -i 's/\r$//' "$WORKDIR/authority-wipe.out"
+grep -qx "wiped" "$WORKDIR/authority-wipe.out" || id42_die "actor credentials were not removed"
+echo "OK operator approval verifies after the MCP host restarts"
+
+authority_key=$(id42_authority_key_path "$ENV_FILE")
+loose_fail() {
+  gateway_run --entrypoint /bin/sh nanobot-gateway -c "chmod 600 ${authority_key}" || true
+  id42_die "$1"
+}
+gateway_run --entrypoint /bin/sh nanobot-gateway -c "chmod 644 ${authority_key}"
+if authority_cmd refuse >"$WORKDIR/authority-loose.out" 2>"$WORKDIR/authority-loose.err"; then
+  :
+else
+  loose_fail "a mode 0644 authority key was not refused"
+fi
+sed -i 's/\r$//' "$WORKDIR/authority-loose.out" || loose_fail "could not read the refuse result"
+grep -qx "refused reason=permissions" "$WORKDIR/authority-loose.out" \
+  || loose_fail "a mode 0644 authority key was not refused for permissions"
+if grep -q 'id42a1\.' "$WORKDIR/authority-loose.out" "$WORKDIR/authority-loose.err"; then
+  loose_fail "the permission refusal printed an actor credential"
+fi
+if probe_cmd >"$WORKDIR/authority-loose-mcp.out" 2>"$WORKDIR/authority-loose-mcp.err"; then
+  loose_fail "MCP host accepted a mode 0644 authority key"
+fi
+if ! grep -q "permissions are too open" "$WORKDIR/authority-loose-mcp.err" \
+  && ! grep -q "permissions are too open" "$WORKDIR/authority-loose-mcp.out"; then
+  cat "$WORKDIR/authority-loose-mcp.err" >&2 || true
+  loose_fail "MCP host did not report that the authority key permissions are too open"
+fi
+gateway_run --entrypoint /bin/sh nanobot-gateway -c "chmod 600 ${authority_key}"
+probe_cmd | tee "$WORKDIR/authority-restored.out"
+sed -i 's/\r$//' "$WORKDIR/authority-restored.out"
+grep -q "mcp-stdio-ok" "$WORKDIR/authority-restored.out" \
+  || id42_die "MCP host did not start again after the authority key mode was restored"
+echo "OK a mode 0644 authority key is refused"
+
 echo "== id42-work uncertain note reconciliation =="
 crash_cmd() {
   gateway_run --entrypoint /opt/id42-work/venv/bin/python \
@@ -848,9 +1004,13 @@ if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.ou
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the default works"
 fi
-if ! grep -q "OK: id42-work pin is 4dc4cef40affc3baaa563f59564b143827f8f3d7" "$WORKDIR/doctor.out"; then
+if ! grep -q "OK: id42-work pin is d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work pin"
+fi
+if ! grep -q "OK: authority key file is mode 0600" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the authority key file"
 fi
 if ! grep -q "OK: id42-work approvals command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2

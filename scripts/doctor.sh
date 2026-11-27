@@ -181,9 +181,83 @@ else
 fi
 rm -f "$probe_out"
 
+key_path=$(id42_authority_key_path "$ENV_FILE")
+key_out=$(mktemp)
+if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
+  --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
+  -e "ID42_WORK_AUTHORITY_KEY_PATH=${key_path}" \
+  nanobot-gateway - <<'PY' | tee "$key_out"
+import json
+import os
+import stat
+from pathlib import Path
+
+import id42_agent.mcp_host as host
+
+path = host.authority_key_file()
+parent = path.parent
+if not parent.is_dir():
+    raise SystemExit(f"authority key directory does not exist: {parent}")
+if parent.stat().st_mode & 0o002:
+    raise SystemExit("authority key directory is writable by others")
+if not os.access(parent, os.W_OK | os.X_OK):
+    raise SystemExit("authority key directory is not writable")
+
+config_path = Path("/home/nanobot/.nanobot/config.json")
+if config_path.is_file():
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    tools = document.get("tools") if isinstance(document, dict) else None
+    servers = tools.get("mcpServers") if isinstance(tools, dict) else None
+    server = servers.get("id42-work") if isinstance(servers, dict) else None
+    if isinstance(server, dict):
+        extra = server.get("env") if isinstance(server.get("env"), dict) else {}
+        configured = extra.get("ID42_WORK_AUTHORITY_KEY_PATH", "")
+        if not isinstance(configured, str):
+            raise SystemExit("config authority key path is not a string")
+        configured = configured.strip()
+        expected = str(path)
+        if configured and configured != expected:
+            raise SystemExit(
+                "config.json authority key path does not match ID42_WORK_AUTHORITY_KEY_PATH"
+            )
+        if not configured and expected != str(host.DEFAULT_AUTHORITY_KEY):
+            raise SystemExit(
+                "config.json does not pass ID42_WORK_AUTHORITY_KEY_PATH to the MCP server"
+            )
+
+if path.is_symlink():
+    raise SystemExit("authority key file is a symlink")
+if not path.exists():
+    print("key-absent")
+    raise SystemExit(0)
+info = path.lstat()
+if not stat.S_ISREG(info.st_mode):
+    raise SystemExit("authority key file is not a regular file")
+mode = stat.S_IMODE(info.st_mode)
+if mode != 0o600:
+    raise SystemExit(f"authority key file mode is {mode:03o}")
+if info.st_uid != os.getuid():
+    raise SystemExit("authority key file is not owned by the gateway user")
+print("key-present")
+PY
+then
+  sed -i 's/\r$//' "$key_out"
+  if grep -qx 'key-present' "$key_out"; then
+    good "authority key file is mode 0600 at ${key_path}; rotate it with scripts/work-rotate-key.sh"
+  elif grep -qx 'key-absent' "$key_out"; then
+    good "authority key file is absent and will be created mode 0600 on first use; rotate it later with scripts/work-rotate-key.sh"
+  else
+    bad "authority key file check failed"
+  fi
+else
+  bad "authority key file check did not run"
+fi
+rm -f "$key_out"
+
 if [[ -n "$container_id" ]]; then
   # Keep in sync with the Dockerfile default for ID42_WORK_REF.
-  expected_pin=4dc4cef40affc3baaa563f59564b143827f8f3d7
+  expected_pin=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
   pin=${pin//$'\r'/}
   pin=${pin//$'\n'/}

@@ -2,16 +2,16 @@
 
 The gateway can start [id42-work](https://github.com/ID42Studio/id42-work) as an MCP server. The server is a child process of the gateway. It speaks stdio. It does not open a port.
 
-The package is `id42-work[mcp]` at commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`. PyPI publishing is not used. The image installs it from git:
+The package is `id42-work[mcp]` at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. PyPI publishing is not used. The image installs it from git:
 
 ```text
-id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@4dc4cef40affc3baaa563f59564b143827f8f3d7
+id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
 ```
 
 `make build` passes that commit as the build arg `ID42_WORK_REF`. Set the same name in the environment to build a different commit, then rebuild. Use a full commit SHA. A branch name moves.
 
 ```bash
-ID42_WORK_REF=4dc4cef40affc3baaa563f59564b143827f8f3d7 make build
+ID42_WORK_REF=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9 make build
 ```
 
 ## Why the virtualenv is separate
@@ -65,6 +65,18 @@ id42-work's `SqliteStorage` is the durable backend with no extra dependency. The
 
 `ID42_WORK_STORE` overrides the SQLite path inside the server process. It has to be absolute and must not resolve under `/home` or `/root`. nanobot does not pass the gateway environment through to the stdio child, apart from `PATH`, `HOME`, and the `env` map in config. Leave the variable unset so the child uses the volume path. Putting the file in the workspace would let file tools read execution inputs.
 
+## Authority key
+
+The same volume holds the HMAC key at `/var/lib/id42-work/authority.key`. The default factory creates that file the first time it opens, mode `0600`, owned by uid 1000. The directory is mode `0700`. id42-work refuses a symlink, a file that is readable by group or other, and a directory that is writable by others. The key is not stored in SQLite. Nothing in the factory, the operator scripts, or doctor prints the key bytes or an actor credential.
+
+`ID42_WORK_AUTHORITY_KEY_PATH` selects another absolute path. The constructor of `ActorAuthority` does not read that variable. The factory reads it with `authority_key_path_from_env` and passes `key_path` with `create_key_file=True`. An unset or blank value keeps the default file. A relative path is an error.
+
+The MCP child does not inherit the gateway environment. When the variable is set before the first init, bootstrap writes it into `tools.mcpServers.id42-work.env`. `scripts/work-approve.sh` and `scripts/work-reconcile.sh` pass the same path into their own process. Those processes and the MCP server then share one key, so a seal issued by one verifies in another. Leave the variable unset to keep the default file on the volume. An existing `config.json` is not rewritten. If you set a custom path later, add the same value to that `env` map or the MCP child will keep using the default file while the scripts use the new one.
+
+`scripts/work-rotate-key.sh` calls `rotate_keys()` on that file. It prints the new signing key id and nothing else. A retired key still verifies seals it produced, until those actors expire. Do not run two rotations at once.
+
+`id42_agent.mcp_stub:server` stays in memory. It does not read or write this file.
+
 `docker compose down` keeps the volume. `docker compose down -v` deletes it. A container restart does not.
 
 An existing `config.json` that already names `id42_agent.mcp_host:server` picks up this factory after the image is rebuilt. Init does not rewrite that file. The new volume starts empty.
@@ -84,7 +96,7 @@ id42-work approvals reject APPROVAL_ID \
 
 The command seals `--actor` in the execution's tenant with only that approval's reviewer grant. For `note` the default grant is `approve:note`. The operator id is `id42-operator`. The execution actor is `id42-agent`. `--resume` continues as the factory's host actor, which performs `notes.append`, and the execution reaches `COMPLETED` when that call succeeds. `reject` ends the execution as `REJECTED`. A second decision on the same approval is refused. `WAITING_REVIEW`, the state for an OUTCOME gate, is accepted. This factory does not request an OUTCOME gate.
 
-`scripts/work-approve.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent`. `approve` adds `--resume`, matching the previous helper: a grant is followed by the host actor's resume.
+`scripts/work-approve.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent` and the authority key path from [Authority key](#authority-key). `approve` adds `--resume`, matching the previous helper: a grant is followed by the host actor's resume.
 
 ```bash
 ./scripts/work-approve.sh list
@@ -97,7 +109,7 @@ The command seals `--actor` in the execution's tenant with only that approval's 
 
 The command is not an MCP tool. The model cannot invoke it while the shell tool is off.
 
-Actor seals are not stored. id42-work keeps the sealing key in process memory and generates a new one on every process. Executions record `actor_id` and `tenant_id`, so a later process that issues those same ids can resume, and a later process can seal `id42-operator` again.
+Executions record `actor_id` and `tenant_id`. The seal itself is not a column in SQLite. The HMAC key that produces it is the file in [Authority key](#authority-key). A later process that opens that file can verify a credential from this one, and can still issue `id42-operator` for a new decision. `TrustedActor.to_credential` carries the seal. `from_credential` only parses it. `ActorAuthority.verify` is what makes it trusted.
 
 ## Reconciliation
 
@@ -131,7 +143,7 @@ id42-work reconcile abandon EXECUTION_ID ACTION_ID \
 
 `list` prints calls that are still `UNCERTAIN`. `show` prints one JSON object. The result is only a `result_digest`.
 
-`scripts/work-reconcile.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent`. It always passes `--factory id42_agent.mcp_host:server`. A decision also passes `--actor id42-operator`. `--resume` is passed through only when the caller sets it. `abandon` has no resume.
+`scripts/work-reconcile.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent` and the same authority key path as approvals. It always passes `--factory id42_agent.mcp_host:server`. A decision also passes `--actor id42-operator`. `--resume` is passed through only when the caller sets it. `abandon` has no resume.
 
 ```bash
 ./scripts/work-reconcile.sh list
@@ -145,10 +157,9 @@ The action id for `note` is `append-note`. The command is not an MCP tool.
 
 ## Gaps in id42-work
 
-Left as they are at commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`:
+Left as they are at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`:
 
 - No approve, reject, or reconcile tool on the MCP server. The CLIs above are the decision path. This repository does not add a WebUI for them.
-- `ActorAuthority` keys stay in memory. There is no durable seal to reload.
 - `PostgresStorage` needs the `postgres` extra. This image does not install it.
 
 ## Your factory
@@ -195,6 +206,6 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 ## Checks
 
-`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
+`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. It checks the authority key file: absent is accepted, because the factory creates it mode `0600` on first use; a file that exists must be a regular file, mode `0600`, owned by the gateway user, and not a symlink. The directory must not be writable by others. When `config.json` names `id42-work`, its `ID42_WORK_AUTHORITY_KEY_PATH` must match the path the operator scripts use. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
-The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again.
+The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It starts one more note in an MCP process, stops that process, and has a second process approve it and keep the operator credential without printing it. A new MCP process then reads the completed execution. A third process verifies the credential and the stored grant. `scripts/work-rotate-key.sh` changes the signing key id, and the earlier credential still verifies. A key file changed to mode `0644` is refused by `ActorAuthority` and by a new MCP process. Restoring mode `0600` lets the server start again. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again.

@@ -3,6 +3,7 @@
 # Runs `id42-work reconcile` inside the gateway. Not an MCP tool.
 # The command seals id42-operator with only reconcile:<work_id>.
 # applied and not-applied resume only when the caller passes --resume.
+# The process uses the same authority key file as the MCP server.
 set -euo pipefail
 
 # shellcheck source=scripts/lib/common.sh
@@ -62,13 +63,5 @@ case "$command" in
     ;;
 esac
 
-id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --user 0 \
-  --entrypoint /bin/sh nanobot-gateway \
-  -c 'chmod 700 /var/lib/id42-work 2>/dev/null || true; chown nanobot:nanobot /var/lib/id42-work'
-
-# exec cannot run a shell function. id42_compose is one, so the compose
-# invocation is written out here and replaces this process.
-exec docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
-  --entrypoint /usr/local/bin/id42-work \
-  -e "PYTHONPATH=/opt/id42-agent" \
-  nanobot-gateway "$@"
+# exec cannot run a shell function. id42_gateway_exec execs docker compose.
+id42_gateway_exec "$ENV_FILE" "$ROOT" /usr/local/bin/id42-work "$@"

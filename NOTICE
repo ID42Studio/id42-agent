@@ -11,7 +11,7 @@ this repository builds.
 
 id42-work is Apache-2.0 and is not relicensed.
 Upstream: https://github.com/ID42Studio/id42-work
-Pinned commit: 4dc4cef40affc3baaa563f59564b143827f8f3d7
+Pinned commit: d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
 Build arg: ID42_WORK_REF
 
 nanobot license text, from LICENSE at the pinned commit:
