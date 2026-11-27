@@ -284,7 +284,7 @@ echo "== id42-work image =="
 # container user could not read a 0600 bind. The temp directory is private.
 chmod a+r "$WORKDIR/mcp.json"
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
-  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --no-build -T --user 1000 \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
   -v "$CONFIG_PY:/tmp/id42_config.py:ro" \
   -v "$WORKDIR/mcp.json:/tmp/mcp-config.json:ro" \
@@ -295,7 +295,7 @@ if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/mcp-valid"; then
   id42_die "nanobot validation printed the web token"
 fi
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
-  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --no-build -T --user 1000 \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
   nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/mcp-probe"
 grep -q "mcp-stdio-ok" "$WORKDIR/mcp-probe"

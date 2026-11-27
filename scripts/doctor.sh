@@ -113,7 +113,7 @@ PY
   fi
 fi
 
-if "${COMPOSE[@]}" run --rm --no-deps --no-build -T --user 1000 \
+if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
   nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py"
 then
