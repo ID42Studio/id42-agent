@@ -18,7 +18,7 @@ Do not invent nanobot settings. A key may be written into `config.json` only whe
 
 `id42-work[mcp]` is installed into `/opt/id42-work/venv`, not into `/app/.venv`. nanobot v0.4.2 requires `mcp<2`. id42-work requires `mcp>=2.3`. The console script on `PATH` is `/usr/local/bin/id42-work`. Do not install that extra into the nanobot virtualenv. The pin and the build arg `ID42_WORK_REF` are in `Dockerfile` and `docker-compose.yml`.
 
-The default factory is `id42_agent.mcp_host:server`. It keeps SQLite at `/var/lib/id42-work` on the `id42-work-data` volume, outside the workspace and outside any home directory. Do not mount that store into the workspace. `id42_agent.mcp_stub:server` is the empty in-memory factory. Approvals are not an MCP tool. `scripts/work-approve.sh` runs `id42-work approvals` for that default factory, with `--actor id42-operator`. `approve` adds `--resume`.
+The default factory is `id42_agent.mcp_host:server`. It keeps SQLite at `/var/lib/id42-work` on the `id42-work-data` volume, outside the workspace and outside any home directory. Do not mount that store into the workspace. `id42_agent.mcp_stub:server` is the empty in-memory factory. Approvals and reconciliation are not MCP tools. `scripts/work-approve.sh` runs `id42-work approvals` for that default factory, with `--actor id42-operator`. `approve` adds `--resume`. `scripts/work-reconcile.sh` runs `id42-work reconcile` the same way. The command seals only `reconcile:<work_id>`. Pass `--resume` only when the caller sets it.
 
 ## First boot
 
@@ -33,7 +33,7 @@ Do not commit `.env`, session stores, memory, or a copied data volume. Scripts m
 ## Checks
 
 ```bash
-shellcheck -x -s bash scripts/bootstrap.sh scripts/doctor.sh scripts/smoke-test.sh scripts/work-approve.sh scripts/lib/common.sh
+shellcheck -x -s bash scripts/bootstrap.sh scripts/doctor.sh scripts/smoke-test.sh scripts/work-approve.sh scripts/work-reconcile.sh scripts/lib/common.sh
 shellcheck -s sh docker/entrypoint.sh
 docker compose --env-file .env.example config --quiet
 ./scripts/smoke-test.sh

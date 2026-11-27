@@ -12,6 +12,8 @@ Commands:
 - ``persist-check ECHO_ID NOTE_ID`` lists executions and requires those ids.
 - ``start-note TEXT KEY`` starts one note and prints its id and status.
 - ``execution-status EXECUTION_ID`` prints the stored status of one execution.
+- ``resume-note EXECUTION_ID`` resumes one execution and prints the same fields.
+- ``list-notes`` runs ``note.list`` and prints each stored note.
 """
 
 from __future__ import annotations
@@ -337,30 +339,76 @@ def start_note(text: str, key: str) -> None:
     print(f"status={status}")
 
 
+def _print_execution(payload: Mapping[str, object]) -> None:
+    status = str(payload.get("status") or "")
+    work_id = str(payload.get("work_id") or "")
+    if not status or not work_id:
+        raise RuntimeError("execution payload had no status")
+    reason = payload.get("status_reason")
+    flag = "true" if payload.get("requires_reconciliation") is True else "false"
+    print(f"status={status}")
+    print(f"work_id={work_id}")
+    print(f"requires_reconciliation={flag}")
+    print(f"status_reason={reason if isinstance(reason, str) else ''}")
+    outcome = payload.get("outcome")
+    output = outcome.get("output") if isinstance(outcome, dict) else None
+    if isinstance(output, dict) and "appended" in output:
+        print(f"appended={output.get('appended')}")
+
+
 def execution_status(execution_id: str) -> None:
     session = _Session()
-    status = ""
-    work_id = ""
-    appended = ""
     try:
         session.initialize()
         payload = session.tool("get_execution", {"execution_id": execution_id})
-        status = str(payload.get("status") or "")
-        work_id = str(payload.get("work_id") or "")
+        _print_execution(payload)
+    except (TimeoutError, OSError, BrokenPipeError, RuntimeError) as exc:
+        session.fail(str(exc))
+    finally:
+        session.close()
+
+
+def resume_note(execution_id: str) -> None:
+    session = _Session()
+    try:
+        session.initialize()
+        payload = session.tool("resume_execution", {"execution_id": execution_id})
+        _print_execution(payload)
+    except (TimeoutError, OSError, BrokenPipeError, RuntimeError) as exc:
+        session.fail(str(exc))
+    finally:
+        session.close()
+
+
+def list_notes() -> None:
+    session = _Session()
+    try:
+        session.initialize()
+        payload = session.tool(
+            "start_execution",
+            {
+                "work_id": "note.list",
+                "version": "1.0.0",
+                "input_data": {"limit": 50},
+            },
+        )
+        if payload.get("status") != "COMPLETED":
+            session.fail(f"note.list did not complete: {payload.get('status')!r}")
         outcome = payload.get("outcome")
         output = outcome.get("output") if isinstance(outcome, dict) else None
-        if isinstance(output, dict) and "appended" in output:
-            appended = str(output.get("appended"))
-        if not status or not work_id:
-            session.fail("get_execution returned no status")
+        notes = output.get("notes") if isinstance(output, dict) else None
+        total = output.get("total") if isinstance(output, dict) else None
+        if not isinstance(notes, list) or isinstance(total, bool) or not isinstance(total, int):
+            session.fail("note.list returned no notes")
+        print(f"total={total}")
+        for note in notes:
+            if not isinstance(note, str):
+                session.fail("note.list returned a note that is not text")
+            print(f"note={note}")
     except (TimeoutError, OSError, BrokenPipeError) as exc:
         session.fail(str(exc))
     finally:
         session.close()
-    print(f"status={status}")
-    print(f"work_id={work_id}")
-    if appended:
-        print(f"appended={appended}")
 
 
 def persist_check(echo_id: str, note_id: str) -> None:
@@ -408,6 +456,14 @@ def main() -> None:
         if len(sys.argv) != 3:
             _fail("usage: mcp_probe.py execution-status EXECUTION_ID", b"")
         execution_status(sys.argv[2])
+    elif command == "resume-note":
+        if len(sys.argv) != 3:
+            _fail("usage: mcp_probe.py resume-note EXECUTION_ID", b"")
+        resume_note(sys.argv[2])
+    elif command == "list-notes":
+        if len(sys.argv) != 2:
+            _fail("usage: mcp_probe.py list-notes", b"")
+        list_notes()
     else:
         _fail(f"unknown command {command}", b"")
 

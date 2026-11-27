@@ -13,7 +13,7 @@ ENV PYTHONPATH=/opt/id42-agent
 ENV ID42_WORK_VENV=/opt/id42-work/venv
 
 # Full commit of ID42Studio/id42-work. Override with --build-arg ID42_WORK_REF.
-ARG ID42_WORK_REF=720013036c9547040118528fdb1d187bdb6f6afb
+ARG ID42_WORK_REF=4dc4cef40affc3baaa563f59564b143827f8f3d7
 
 RUN set -eu; \
     case "$ID42_WORK_REF" in \
@@ -28,8 +28,15 @@ RUN set -eu; \
     chmod 700 /var/lib/id42-work; \
     chown -R nanobot:nanobot /opt/id42-work /opt/id42-agent /var/lib/id42-work; \
     ID42_WORK_STORE=/tmp/id42-work-build.sqlite PYTHONPATH=/opt/id42-agent \
-      "$ID42_WORK_VENV/bin/python" -c 'import asyncio; import id42_agent.mcp_host as host; import id42_agent.mcp_stub as stub; server = host.server(); listed = asyncio.run(server.list_works()); ids = sorted(item["id"] for item in listed["works"]); assert ids == sorted(host.DEFAULT_WORK_IDS), ids; assert type(stub.server()).__name__ == "WorkMcpServer"'; \
+      "$ID42_WORK_VENV/bin/python" -m id42_agent.build_check; \
     "$ID42_WORK_VENV/bin/id42-work" approvals approve --help >/dev/null; \
-    rm -f /tmp/id42-work-build.sqlite /tmp/id42-work-build.sqlite-wal /tmp/id42-work-build.sqlite-shm
+    "$ID42_WORK_VENV/bin/id42-work" reconcile abandon --help >/dev/null; \
+    rm -f /opt/id42-agent/id42_agent/build_check.py \
+      /opt/id42-agent/id42_agent/__pycache__/build_check*.pyc \
+      /tmp/id42-work-build.sqlite /tmp/id42-work-build.sqlite-wal /tmp/id42-work-build.sqlite-shm \
+      /tmp/id42-notes-legacy.jsonl /tmp/id42-notes-legacy.jsonl.lock \
+      /tmp/id42-notes-build.jsonl /tmp/id42-notes-build.jsonl.lock \
+      /tmp/id42-notes-dir.lock; \
+    rmdir /tmp/id42-notes-dir
 
 USER root

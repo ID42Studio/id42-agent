@@ -13,6 +13,20 @@ workspace and outside any home directory:
   (``approve:note`` for this work). ``--resume`` continues as the host actor
   issued here.
 
+``notes.append`` stores the capability ``operation_id`` on the note. That id
+is the call's idempotency key. ``reconcile`` looks it up and does not write:
+
+- the id is in a readable file: ``APPLIED``, with the stored append result
+- the file is readable and the id is absent: ``NOT_APPLIED``
+- the file is missing: ``NOT_APPLIED``
+- the file is unreadable or a line is not a note: ``UNKNOWN``
+
+A line that only has ``text`` is still listed. It cannot prove a later call.
+Resume probes ``UNCERTAIN`` calls. ``APPLIED`` is replayed. ``NOT_APPLIED``
+retries the same operation id and asks for approval again. The execution
+actor is not given ``reconcile:note``. ``id42-work reconcile`` seals that
+grant for ``OPERATOR_ID`` when an operator decides, and only that grant.
+
 The database file is ``/var/lib/id42-work/work.sqlite`` unless
 ``ID42_WORK_STORE`` is an absolute path outside ``/home`` and ``/root``.
 Compose mounts a named volume there. The file survives a container restart.
@@ -21,7 +35,8 @@ Compose mounts a named volume there. The file survives a container restart.
 Actor seals are not stored. id42-work keeps the sealing key in process
 memory. Executions record ``actor_id`` and ``tenant_id``, so a new process
 that issues those same ids can resume. This factory does not seal the
-operator. The approvals command does, from the authority on the server.
+operator. The approvals command and the reconcile command do, from the
+authority on the server, each with only the grant that decision needs.
 """
 
 from __future__ import annotations
@@ -43,6 +58,8 @@ from id42_work import (
     ExecutionContext,
     ExecutionLimits,
     Policy,
+    ReconciliationProbe,
+    ReconciliationVerdict,
     SqliteStorage,
     StaticPolicyResolver,
     TrustedActor,
@@ -59,8 +76,9 @@ NOTES_NAME = "notes.jsonl"
 MAX_NOTE_CHARS = 2000
 MAX_NOTES_BYTES = 1_048_576
 ACTOR_ID = "id42-agent"
-# scripts/work-approve.sh passes this id to `id42-work approvals --actor`.
-# The command seals it. This module does not.
+# scripts/work-approve.sh and scripts/work-reconcile.sh pass this id to
+# `--actor`. Each command seals it. This module does not. Approvals seal
+# only the reviewer grant. Reconcile seals only reconcile:<work_id>.
 OPERATOR_ID = "id42-operator"
 TENANT_ID = "local"
 AUTHORITY_ID = "id42-agent"
@@ -73,8 +91,10 @@ WORK_VERSION = "1.0.0"
 # Keep in sync with scripts/lib/mcp_probe.py (_DEFAULT_WORKS).
 DEFAULT_WORK_IDS = (WORK_ECHO, WORK_NOTE, WORK_NOTE_LIST)
 _AGENT_GRANTS = frozenset({NOTES_APPEND, NOTES_READ})
-if OPERATOR_ID == ACTOR_ID:
-    raise RuntimeError("OPERATOR_ID and ACTOR_ID must differ")
+if OPERATOR_ID == ACTOR_ID or any(
+    grant.startswith(("approve:", "reconcile:")) for grant in _AGENT_GRANTS
+):
+    raise RuntimeError("the execution actor must not approve or reconcile its own work")
 _FORBIDDEN_ROOTS = (Path("/home"), Path("/root"))
 _LIMITS = ExecutionLimits(timeout=timedelta(seconds=30))
 
@@ -141,6 +161,32 @@ class ListNotes:
         return NoteListOutput(notes=list(notes), total=total)
 
 
+def _note_record(item: object, line_number: int) -> dict[str, JsonValue]:
+    """One stored note.
+
+    ``operation_id`` is the capability call's idempotency key. Lines written
+    before that field existed have ``text`` and still list. They do not match
+    a later reconcile. A line that is not a note is corrupt.
+    """
+    if not isinstance(item, dict):
+        raise RuntimeError(f"note store line {line_number} is not a note")
+    text = item.get("text")
+    if not isinstance(text, str):
+        raise RuntimeError(f"note store line {line_number} is not a note")
+    operation_id = item.get("operation_id")
+    if operation_id is not None and not isinstance(operation_id, str):
+        raise RuntimeError(f"note store line {line_number} is not a note")
+    byte_count = item.get("byte_count")
+    if byte_count is None:
+        byte_count = len(text.encode("utf-8"))
+    if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
+        raise RuntimeError(f"note store line {line_number} is not a note")
+    record: dict[str, JsonValue] = {"text": text, "byte_count": byte_count}
+    if isinstance(operation_id, str):
+        record["operation_id"] = operation_id
+    return record
+
+
 def _require_note_text(text: str) -> None:
     if not text.strip() or len(text) > MAX_NOTE_CHARS or "\x00" in text:
         raise ValueError("note text must be 1 to 2000 non-blank characters")
@@ -184,6 +230,27 @@ class NoteStore:
         if capability == NOTES_APPEND:
             return self._append(params, call)
         raise RuntimeError(f"unknown capability {capability}")
+
+    async def reconcile(self, call: CapabilityCall) -> ReconciliationProbe:
+        """Prove whether this operation id was appended. Does not write."""
+        operation_id = str(call.operation_id)
+        try:
+            records = self._locked(self._load_unlocked)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return ReconciliationProbe(verdict=ReconciliationVerdict.UNKNOWN)
+        if not isinstance(records, list):
+            return ReconciliationProbe(verdict=ReconciliationVerdict.UNKNOWN)
+        for item in records:
+            if not isinstance(item, dict) or item.get("operation_id") != operation_id:
+                continue
+            byte_count = item.get("byte_count")
+            if isinstance(byte_count, bool) or not isinstance(byte_count, int) or byte_count < 0:
+                return ReconciliationProbe(verdict=ReconciliationVerdict.UNKNOWN)
+            return ReconciliationProbe(
+                verdict=ReconciliationVerdict.APPLIED,
+                result={"appended": True, "byte_count": byte_count},
+            )
+        return ReconciliationProbe(verdict=ReconciliationVerdict.NOT_APPLIED)
 
     def _read(self, params: Mapping[str, object]) -> dict[str, JsonValue]:
         limit = params.get("limit", 20)
@@ -236,19 +303,7 @@ class NoteStore:
                     item = json.loads(stripped)
                 except json.JSONDecodeError as exc:
                     raise RuntimeError(f"note store line {line_number} is not JSON") from exc
-                text = item.get("text") if isinstance(item, dict) else None
-                operation_id = item.get("operation_id") if isinstance(item, dict) else None
-                byte_count = item.get("byte_count") if isinstance(item, dict) else None
-                if (
-                    not isinstance(text, str)
-                    or not isinstance(operation_id, str)
-                    or isinstance(byte_count, bool)
-                    or not isinstance(byte_count, int)
-                ):
-                    raise RuntimeError(f"note store line {line_number} is not a note")
-                records.append(
-                    {"text": text, "operation_id": operation_id, "byte_count": byte_count}
-                )
+                records.append(_note_record(item, line_number))
         return records
 
     def _locked(self, fn: Callable[[], JsonValue]) -> JsonValue:
@@ -344,7 +399,9 @@ def _works() -> tuple[tuple[Work, object], ...]:
             "Append one note to the host store outside the agent workspace. "
             "This calls the side-effecting capability notes.append and waits for approval. "
             "Pass an idempotency_key. There is no approve tool. A person decides outside "
-            "this server with id42-work approvals. resume_execution does not decide."
+            "this server with id42-work approvals. resume_execution does not decide. "
+            "If the append is left UNCERTAIN, resume probes the note file by operation id. "
+            "A person closes a call the file cannot prove with id42-work reconcile."
         ),
         input_schema=NoteInput,
         output_schema=NoteOutput,

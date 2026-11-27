@@ -641,6 +641,186 @@ grep -qx "status=COMPLETED" "$WORKDIR/wrapper-status.out" \
   || id42_die "wrapper-approved note is not COMPLETED in the store"
 echo "OK id42-work approvals list, approve --resume, and reject"
 
+echo "== id42-work uncertain note reconciliation =="
+crash_cmd() {
+  gateway_run --entrypoint /opt/id42-work/venv/bin/python \
+    -e "PYTHONPATH=/opt/id42-agent" \
+    nanobot-gateway - "$@" <"$ROOT/scripts/lib/reconcile_crash.py"
+}
+
+crash_field() {
+  awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$2"
+}
+
+require_field() {
+  local file=$1 key=$2 expected=$3 got
+  got=$(crash_field "$key" "$file")
+  [[ "$got" == "$expected" ]] || id42_die "$key is ${got:-missing}, expected $expected ($file)"
+}
+
+crash_cmd seed-legacy "smoke-legacy-note" | tee "$WORKDIR/legacy-seed.out"
+probe_cmd list-notes | tee "$WORKDIR/legacy-list.out"
+sed -i 's/\r$//' "$WORKDIR/legacy-list.out"
+grep -qx "note=smoke-legacy-note" "$WORKDIR/legacy-list.out" \
+  || id42_die "a note written without operation_id did not list"
+
+crash_cmd crash after "smoke-recon-applied" "smoke-recon-applied" | tee "$WORKDIR/applied-crash.out"
+sed -i 's/\r$//' "$WORKDIR/applied-crash.out"
+applied_exec=$(crash_field execution_id "$WORKDIR/applied-crash.out")
+require_field "$WORKDIR/applied-crash.out" status FAILED
+require_field "$WORKDIR/applied-crash.out" requires_reconciliation true
+require_field "$WORKDIR/applied-crash.out" journal_status UNCERTAIN
+require_field "$WORKDIR/applied-crash.out" action_id append-note
+require_field "$WORKDIR/applied-crash.out" capability notes.append
+require_field "$WORKDIR/applied-crash.out" note_count 1
+[[ -n "$applied_exec" ]] || id42_die "applied crash returned no execution id"
+
+crash_cmd corrupt-notes | tee "$WORKDIR/applied-corrupt.out"
+probe_cmd resume-note "$applied_exec" | tee "$WORKDIR/applied-unknown.out"
+sed -i 's/\r$//' "$WORKDIR/applied-unknown.out"
+require_field "$WORKDIR/applied-unknown.out" status FAILED
+require_field "$WORKDIR/applied-unknown.out" requires_reconciliation true
+crash_cmd inspect "$applied_exec" "smoke-recon-applied" | tee "$WORKDIR/applied-unknown-journal.out"
+sed -i 's/\r$//' "$WORKDIR/applied-unknown-journal.out"
+require_field "$WORKDIR/applied-unknown-journal.out" journal_status UNCERTAIN
+require_field "$WORKDIR/applied-unknown-journal.out" note_count 1
+
+crash_cmd repair-notes | tee "$WORKDIR/applied-repair.out"
+probe_cmd resume-note "$applied_exec" | tee "$WORKDIR/applied-resume.out"
+sed -i 's/\r$//' "$WORKDIR/applied-resume.out"
+require_field "$WORKDIR/applied-resume.out" status COMPLETED
+require_field "$WORKDIR/applied-resume.out" requires_reconciliation false
+require_field "$WORKDIR/applied-resume.out" appended True
+crash_cmd inspect "$applied_exec" "smoke-recon-applied" | tee "$WORKDIR/applied-done.out"
+sed -i 's/\r$//' "$WORKDIR/applied-done.out"
+require_field "$WORKDIR/applied-done.out" journal_status SUCCEEDED
+require_field "$WORKDIR/applied-done.out" note_count 1
+
+crash_cmd crash before "smoke-recon-missing" "smoke-recon-missing" | tee "$WORKDIR/missing-crash.out"
+sed -i 's/\r$//' "$WORKDIR/missing-crash.out"
+missing_exec=$(crash_field execution_id "$WORKDIR/missing-crash.out")
+require_field "$WORKDIR/missing-crash.out" status FAILED
+require_field "$WORKDIR/missing-crash.out" requires_reconciliation true
+require_field "$WORKDIR/missing-crash.out" journal_status UNCERTAIN
+require_field "$WORKDIR/missing-crash.out" note_count 0
+[[ -n "$missing_exec" ]] || id42_die "missing crash returned no execution id"
+probe_cmd resume-note "$missing_exec" | tee "$WORKDIR/missing-resume.out"
+sed -i 's/\r$//' "$WORKDIR/missing-resume.out"
+require_field "$WORKDIR/missing-resume.out" status WAITING_APPROVAL
+require_field "$WORKDIR/missing-resume.out" requires_reconciliation false
+crash_cmd inspect "$missing_exec" "smoke-recon-missing" | tee "$WORKDIR/missing-waiting.out"
+sed -i 's/\r$//' "$WORKDIR/missing-waiting.out"
+require_field "$WORKDIR/missing-waiting.out" note_count 0
+require_field "$WORKDIR/missing-waiting.out" journal_status PENDING_APPROVAL
+approvals_cmd list --factory id42_agent.mcp_host:server | tee "$WORKDIR/missing-list.out"
+sed -i 's/\r$//' "$WORKDIR/missing-list.out"
+missing_approval=$(approval_id_for "$WORKDIR/missing-list.out" "$missing_exec") \
+  || id42_die "the retried note did not ask for approval again"
+require_pending_line "$WORKDIR/missing-list.out" "$missing_exec"
+approvals_cmd approve "$missing_approval" \
+  --factory id42_agent.mcp_host:server \
+  --actor id42-operator \
+  --reason "retry" \
+  --resume | tee "$WORKDIR/missing-approve.out"
+sed -i 's/\r$//' "$WORKDIR/missing-approve.out"
+grep -q "execution_status=COMPLETED" "$WORKDIR/missing-approve.out" \
+  || id42_die "retried note did not complete after approval"
+crash_cmd inspect "$missing_exec" "smoke-recon-missing" | tee "$WORKDIR/missing-done.out"
+sed -i 's/\r$//' "$WORKDIR/missing-done.out"
+require_field "$WORKDIR/missing-done.out" status COMPLETED
+require_field "$WORKDIR/missing-done.out" journal_status SUCCEEDED
+require_field "$WORKDIR/missing-done.out" note_count 1
+
+crash_cmd crash before "smoke-recon-abandon" "smoke-recon-abandon" | tee "$WORKDIR/abandon-crash.out"
+sed -i 's/\r$//' "$WORKDIR/abandon-crash.out"
+abandon_exec=$(crash_field execution_id "$WORKDIR/abandon-crash.out")
+abandon_action=$(crash_field action_id "$WORKDIR/abandon-crash.out")
+require_field "$WORKDIR/abandon-crash.out" journal_status UNCERTAIN
+require_field "$WORKDIR/abandon-crash.out" note_count 0
+[[ -n "$abandon_exec" && -n "$abandon_action" ]] || id42_die "abandon crash returned no ids"
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-reconcile.sh" list | tee "$WORKDIR/reconcile-list.out"
+sed -i 's/\r$//' "$WORKDIR/reconcile-list.out"
+grep -q "execution_id=${abandon_exec}" "$WORKDIR/reconcile-list.out" \
+  || id42_die "work-reconcile.sh list did not show the uncertain note"
+if grep -q "execution_id=${applied_exec}" "$WORKDIR/reconcile-list.out"; then
+  id42_die "work-reconcile.sh list showed the reconciled note"
+fi
+if grep -q "execution_id=${missing_exec}" "$WORKDIR/reconcile-list.out"; then
+  id42_die "work-reconcile.sh list showed the retried note"
+fi
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-reconcile.sh" show "$abandon_exec" "$abandon_action" \
+  | tee "$WORKDIR/reconcile-show.out"
+sed -i 's/\r$//' "$WORKDIR/reconcile-show.out"
+grep -q '"journal_status": "UNCERTAIN"' "$WORKDIR/reconcile-show.out" \
+  || id42_die "work-reconcile.sh show did not report UNCERTAIN"
+grep -q '"work_id": "note"' "$WORKDIR/reconcile-show.out" \
+  || id42_die "work-reconcile.sh show did not report the note work"
+
+if gateway_run --entrypoint /usr/local/bin/id42-work -e "PYTHONPATH=/opt/id42-agent" \
+  nanobot-gateway reconcile abandon "$abandon_exec" "$abandon_action" \
+  --factory id42_agent.mcp_host:server \
+  --actor id42-agent \
+  --reason "the execution actor must not decide" \
+  >"$WORKDIR/reconcile-self.out" 2>"$WORKDIR/reconcile-self.err"
+then
+  id42_die "the execution actor reconciled its own call"
+fi
+grep -q "id42-work:" "$WORKDIR/reconcile-self.err" \
+  || {
+    cat "$WORKDIR/reconcile-self.err" >&2 || true
+    id42_die "a self-reconcile failed without an id42-work error"
+  }
+crash_cmd inspect "$abandon_exec" "smoke-recon-abandon" | tee "$WORKDIR/abandon-still.out"
+sed -i 's/\r$//' "$WORKDIR/abandon-still.out"
+require_field "$WORKDIR/abandon-still.out" journal_status UNCERTAIN
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-reconcile.sh" abandon "$abandon_exec" "$abandon_action" \
+  --reason "cannot be known" | tee "$WORKDIR/reconcile-abandon.out"
+sed -i 's/\r$//' "$WORKDIR/reconcile-abandon.out"
+grep -q "abandoned execution_id=${abandon_exec} " "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon did not report the execution"
+grep -q "journal_status=ABANDONED" "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon did not abandon the call"
+grep -q "execution_status=FAILED" "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon did not leave the execution FAILED"
+grep -q "resumed=false" "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon resumed the execution"
+grep -q "decision_actor_id=id42-operator" "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon did not record id42-operator"
+grep -q "status_reason=reconciliation_abandoned" "$WORKDIR/reconcile-abandon.out" \
+  || id42_die "work-reconcile.sh abandon did not record reconciliation_abandoned"
+
+probe_cmd resume-note "$abandon_exec" | tee "$WORKDIR/abandon-resume.out"
+sed -i 's/\r$//' "$WORKDIR/abandon-resume.out"
+require_field "$WORKDIR/abandon-resume.out" status FAILED
+require_field "$WORKDIR/abandon-resume.out" requires_reconciliation false
+require_field "$WORKDIR/abandon-resume.out" status_reason reconciliation_abandoned
+crash_cmd inspect "$abandon_exec" "smoke-recon-abandon" | tee "$WORKDIR/abandon-done.out"
+sed -i 's/\r$//' "$WORKDIR/abandon-done.out"
+require_field "$WORKDIR/abandon-done.out" journal_status ABANDONED
+require_field "$WORKDIR/abandon-done.out" note_count 0
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-reconcile.sh" list | tee "$WORKDIR/reconcile-list-done.out"
+sed -i 's/\r$//' "$WORKDIR/reconcile-list-done.out"
+grep -qx "uncertain-none" "$WORKDIR/reconcile-list-done.out" \
+  || id42_die "an uncertain note was still listed after reconciliation"
+probe_cmd list-notes | tee "$WORKDIR/recon-notes.out"
+sed -i 's/\r$//' "$WORKDIR/recon-notes.out"
+grep -qx "note=smoke-legacy-note" "$WORKDIR/recon-notes.out" \
+  || id42_die "reconciliation dropped the legacy note"
+applied_notes=$(grep -cx "note=smoke-recon-applied" "$WORKDIR/recon-notes.out" || true)
+missing_notes=$(grep -cx "note=smoke-recon-missing" "$WORKDIR/recon-notes.out" || true)
+abandon_notes=$(grep -cx "note=smoke-recon-abandon" "$WORKDIR/recon-notes.out" || true)
+[[ "$applied_notes" == "1" && "$missing_notes" == "1" && "$abandon_notes" == "0" ]] \
+  || id42_die "note counts applied=${applied_notes} missing=${missing_notes} abandon=${abandon_notes}"
+echo "OK uncertain notes reconcile from the file, and abandon stays failed"
+
 echo "== doctor security baseline on the running gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
@@ -668,13 +848,17 @@ if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.ou
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the default works"
 fi
-if ! grep -q "OK: id42-work pin is 720013036c9547040118528fdb1d187bdb6f6afb" "$WORKDIR/doctor.out"; then
+if ! grep -q "OK: id42-work pin is 4dc4cef40affc3baaa563f59564b143827f8f3d7" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work pin"
 fi
 if ! grep -q "OK: id42-work approvals command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work approvals command"
+fi
+if ! grep -q "OK: id42-work reconcile command is available" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work reconcile command"
 fi
 echo "OK doctor accepts the running gateway baseline"
 
