@@ -67,7 +67,7 @@ curl --fail http://127.0.0.1:18790/health
 | | Make | Compose |
 |---|---|---|
 | Init | `make init` | `./scripts/bootstrap.sh` |
-| Build | `make build` | `docker compose build nanobot-gateway` |
+| Build | `make build` | `docker compose build nanobot-upstream nanobot-gateway` |
 | Start | `make up` | `docker compose up -d nanobot-gateway` |
 | Stop | `make down` | `docker compose down` |
 | Restart | `make restart` | `docker compose restart nanobot-gateway` |

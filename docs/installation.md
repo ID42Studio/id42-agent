@@ -35,7 +35,7 @@ Equivalent commands:
 docker compose up -d nanobot-gateway
 ```
 
-The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`, then installs `id42-work[mcp]` at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`. `make build` is `docker compose --profile upstream build nanobot-gateway`.
+The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`, then installs `id42-work[mcp]` at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`. `make build` is `docker compose build nanobot-upstream nanobot-gateway`.
 
 Init then:
 

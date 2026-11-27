@@ -48,12 +48,11 @@ x-nanobot: &nanobot
     - org.opencontainers.image.licenses=MIT AND Apache-2.0
 
 services:
-  # Build-only. `docker compose up` does not start it. `make build` passes
-  # `--profile upstream` so Compose can use the resulting image as the
-  # gateway's base. The entrypoint exits if the profile is started by hand.
+  # Build-only base image. It stays in the default project because a newer
+  # Compose rejects additional_contexts that point at a profiled service
+  # (`unknown service`) during `docker compose config`. The process exits
+  # immediately. `make up` starts only nanobot-gateway.
   nanobot-upstream:
-    profiles:
-      - upstream
     image: id42-agent-nanobot-upstream:0.4.2
     pull_policy: never
     build:

@@ -6,7 +6,7 @@ init:
 	./scripts/bootstrap.sh
 
 build:
-	$(COMPOSE) --profile upstream build nanobot-gateway
+	$(COMPOSE) build nanobot-upstream nanobot-gateway
 
 up: init
 	$(COMPOSE) up -d nanobot-gateway
