@@ -1,7 +1,8 @@
 # The image named "upstream" is the pinned nanobot Dockerfile, passed by
 # Compose as an additional build context (service:nanobot-upstream).
 # id42-work needs mcp>=2.3. nanobot v0.4.2 requires mcp<2. A second virtualenv
-# keeps those pins apart. Only the id42-work console script is placed on PATH;
+# keeps those pins apart. The postgres extra (psycopg) stays in that same
+# virtualenv. Only the id42-work console script is placed on PATH;
 # `python` stays the nanobot interpreter.
 FROM upstream
 
@@ -21,7 +22,7 @@ RUN set -eu; \
     esac; \
     uv venv "$ID42_WORK_VENV"; \
     uv pip install --python "$ID42_WORK_VENV/bin/python" --no-cache \
-      "id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@${ID42_WORK_REF}"; \
+      "id42-work[mcp,postgres] @ git+https://github.com/ID42Studio/id42-work.git@${ID42_WORK_REF}"; \
     ln -sfn "$ID42_WORK_VENV/bin/id42-work" /usr/local/bin/id42-work; \
     printf '%s\n' "$ID42_WORK_REF" > /opt/id42-agent/ID42_WORK_REF; \
     mkdir -p /var/lib/id42-work; \

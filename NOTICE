@@ -4,8 +4,8 @@ Upstream: https://github.com/HKUDS/nanobot
 Pinned release: v0.4.2
 Pinned commit: 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
 
-The image is produced from that commit's Dockerfile, then id42-work is
-installed into a separate virtualenv. The Dockerfile copies nanobot's LICENSE
+The image is produced from that commit's Dockerfile, then id42-work[mcp,postgres]
+is installed into a separate virtualenv. The Dockerfile copies nanobot's LICENSE
 and THIRD_PARTY_NOTICES.md into the image. Those files stay in every image
 this repository builds.
 

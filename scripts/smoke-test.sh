@@ -12,8 +12,15 @@ PROJECT=${COMPOSE_PROJECT_NAME:-id42smoke$$}
 WORKDIR=$(mktemp -d)
 ENV_FILE=$WORKDIR/smoke.env
 LOG=$WORKDIR/gateway.log
+PG_PROJECT=""
+PG_ENV=""
 
 cleanup() {
+  if [[ -n "$PG_PROJECT" && -n "$PG_ENV" && -f "$PG_ENV" ]]; then
+    COMPOSE_PROJECT_NAME=$PG_PROJECT \
+      docker compose --env-file "$PG_ENV" --profile postgres -f "$ROOT/docker-compose.yml" \
+      down -v --remove-orphans >/dev/null 2>&1 || true
+  fi
   if [[ -f "$ENV_FILE" ]]; then
     ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
       docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" down -v --remove-orphans \
@@ -197,6 +204,53 @@ NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
 EOF
 expect_fail "authority key under home" python3 "$CONFIG_PY" render --env-file "$WORKDIR/home-key.env" --output "$WORKDIR/home-key.json"
 
+cat >"$WORKDIR/bad-storage.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_STORAGE=mysql
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "storage backend" python3 "$CONFIG_PY" render --env-file "$WORKDIR/bad-storage.env" --output "$WORKDIR/bad-storage.json"
+
+cat >"$WORKDIR/postgres-no-url.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_STORAGE=postgres
+ID42_WORK_DATABASE_URL=
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "postgres without url" python3 "$CONFIG_PY" render --env-file "$WORKDIR/postgres-no-url.env" --output "$WORKDIR/postgres-no-url.json"
+
+cat >"$WORKDIR/postgres-bad-url.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_STORAGE=postgres
+ID42_WORK_DATABASE_URL=http://postgres:5432/id42_work
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "postgres url scheme" python3 "$CONFIG_PY" render --env-file "$WORKDIR/postgres-bad-url.env" --output "$WORKDIR/postgres-bad-url.json"
+
+cat >"$WORKDIR/postgres-home-socket.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_STORAGE=postgres
+ID42_WORK_DATABASE_URL=host=/home/nanobot dbname=id42_work
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "postgres socket under home" python3 "$CONFIG_PY" render --env-file "$WORKDIR/postgres-home-socket.env" --output "$WORKDIR/postgres-home-socket.json"
+
 cat >"$ENV_FILE" <<'EOF'
 TZ=America/Sao_Paulo
 OLLAMA_BASE_URL=http://host.docker.internal:9/v1
@@ -251,6 +305,8 @@ assert server["args"] == ["mcp", "serve", "--factory", "id42_agent.mcp_host:serv
 assert server["toolTimeout"] == 120
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent:/srv/id42-work-host"
 assert "ID42_WORK_AUTHORITY_KEY_PATH" not in server["env"]
+assert "ID42_WORK_STORAGE" not in server["env"]
+assert "ID42_WORK_DATABASE_URL" not in server["env"]
 assert "url" not in server
 assert "--http" not in server["args"]
 assert "ssrfWhitelist" not in doc["tools"]
@@ -275,6 +331,8 @@ doc = json.load(open(sys.argv[1]))
 server = doc["tools"]["mcpServers"]["id42-work"]
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
 assert "ID42_WORK_AUTHORITY_KEY_PATH" not in server["env"]
+assert "ID42_WORK_STORAGE" not in server["env"]
+assert "ID42_WORK_DATABASE_URL" not in server["env"]
 print("default factory PYTHONPATH is the image module path")
 PY
 
@@ -343,6 +401,70 @@ server = doc["tools"]["mcpServers"]["id42-work"]
 assert server["env"]["ID42_WORK_AUTHORITY_KEY_PATH"] == "/var/lib/id42-work/keys/authority.key"
 assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
 print("authority key path is passed to the MCP child")
+PY
+
+python3 - "$CONFIG_PY" "$WORKDIR" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("id42_config", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+workdir = Path(sys.argv[2])
+password = "smoke-db-password-do-not-leak"
+url = f"postgresql://id42:{password}@postgres:5432/id42_work"
+base = {
+    "TZ": "America/Sao_Paulo",
+    "OLLAMA_BASE_URL": "http://host.docker.internal:9/v1",
+    "OLLAMA_MODEL": "smoke-model",
+    "TELEGRAM_ENABLED": "false",
+    "ID42_WORK_ENABLED": "true",
+    "NANOBOT_WEB_TOKEN": "smoke-web-token-do-not-leak",
+}
+postgres_env = dict(base)
+postgres_env["ID42_WORK_STORAGE"] = "postgres"
+postgres_env["ID42_WORK_DATABASE_URL"] = url
+env_path = workdir / "postgres-storage.env"
+env_path.write_text("".join(f"{key}={value}\n" for key, value in postgres_env.items()), encoding="utf-8")
+rendered = workdir / "postgres-storage.json"
+stdout = workdir / "postgres-storage.out"
+# render() prints only the output path.
+import contextlib
+import io
+buffer = io.StringIO()
+with contextlib.redirect_stdout(buffer):
+    mod.render(env_path, rendered)
+summary_buffer = io.StringIO()
+with contextlib.redirect_stdout(summary_buffer):
+    mod.public_summary(env_path, None)
+stdout.write_text(buffer.getvalue() + summary_buffer.getvalue(), encoding="utf-8")
+if password in stdout.read_text(encoding="utf-8") or url in stdout.read_text(encoding="utf-8"):
+    raise SystemExit("render or summary printed the database URL")
+document = json.loads(rendered.read_text(encoding="utf-8"))
+server = document["tools"]["mcpServers"]["id42-work"]
+if server["env"].get("ID42_WORK_STORAGE") != "postgres":
+    raise SystemExit("postgres storage was not written for the MCP child")
+if server["env"].get("ID42_WORK_DATABASE_URL") != url:
+    raise SystemExit("postgres URL was not written for the MCP child")
+summary = json.loads(summary_buffer.getvalue())
+if summary["env"]["ID42_WORK_STORAGE"] != "postgres":
+    raise SystemExit("summary did not report postgres")
+if summary["env"]["id42_work_database_url_set"] is not True:
+    raise SystemExit("summary did not report that a database URL is set")
+if password in json.dumps(summary) or url in json.dumps(summary):
+    raise SystemExit("summary included the database URL")
+sqlite_env = dict(base)
+sqlite_env["ID42_WORK_STORAGE"] = "sqlite"
+sqlite_env["ID42_WORK_DATABASE_URL"] = url
+sqlite_path = workdir / "sqlite-ignores-url.env"
+sqlite_path.write_text("".join(f"{key}={value}\n" for key, value in sqlite_env.items()), encoding="utf-8")
+sqlite_doc = mod.build_config(mod.load_env_file(sqlite_path))
+sqlite_server = sqlite_doc["tools"]["mcpServers"]["id42-work"]
+if "ID42_WORK_STORAGE" in sqlite_server["env"] or "ID42_WORK_DATABASE_URL" in sqlite_server["env"]:
+    raise SystemExit("sqlite config copied the database URL")
+print("postgres storage is passed to the MCP child and is not printed")
 PY
 
 echo "== compose config =="
@@ -996,9 +1118,17 @@ if ! grep -q "OK: id42-work config is stdio-only" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work config"
 fi
+if ! grep -q "OK: id42-work storage backend is sqlite" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not report the sqlite backend"
+fi
 if ! grep -q "OK: id42-work store is writable, mounted, and opens SQLite" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work store"
+fi
+if ! grep -q "OK: id42-work storage config has no MCP server env to compare" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not report the absent storage config"
 fi
 if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
@@ -1033,4 +1163,264 @@ if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/bootstrap3.log"; then
 fi
 grep -q "leaving WebUI edits unchanged" "$WORKDIR/bootstrap3.log"
 echo "OK bootstrap is idempotent after mode-700 data directories exist"
+
+echo "== id42-work postgres profile =="
+PG_PROJECT=id42pg$$
+PG_ENV=$WORKDIR/postgres-runtime.env
+python3 - "$PG_ENV" <<'PY'
+import secrets
+import sys
+from pathlib import Path
+
+password = secrets.token_hex(24)
+user = "id42"
+database = "id42_work"
+url = f"postgresql://{user}:{password}@postgres:5432/{database}"
+text = "\n".join(
+    [
+        "TZ=America/Sao_Paulo",
+        "OLLAMA_BASE_URL=http://host.docker.internal:9/v1",
+        "OLLAMA_MODEL=smoke-model",
+        "TELEGRAM_ENABLED=false",
+        "TELEGRAM_BOT_TOKEN=",
+        "TELEGRAM_ALLOWED_USERS=",
+        "NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak",
+        "ID42_WORK_ENABLED=true",
+        "ID42_WORK_STORAGE=postgres",
+        f"ID42_WORK_DATABASE_URL={url}",
+        f"ID42_POSTGRES_USER={user}",
+        f"ID42_POSTGRES_PASSWORD={password}",
+        f"ID42_POSTGRES_DB={database}",
+        "",
+    ]
+)
+path = Path(sys.argv[1])
+path.write_text(text, encoding="utf-8")
+path.chmod(0o600)
+PY
+
+scan_secrets() {
+  python3 - "$PG_ENV" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+found = {}
+for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not raw or raw.startswith("#") or "=" not in raw:
+        continue
+    key, value = raw.split("=", 1)
+    found[key] = value
+secrets = [found.get("ID42_WORK_DATABASE_URL", ""), found.get("ID42_POSTGRES_PASSWORD", "")]
+secrets = [item for item in secrets if item]
+failed = False
+for name in sys.argv[2:]:
+    text = Path(name).read_text(encoding="utf-8", errors="replace")
+    if any(secret in text for secret in secrets):
+        print(f"id42-agent: {name} contained a database secret", file=sys.stderr)
+        failed = True
+if failed:
+    raise SystemExit(1)
+PY
+}
+
+pg_compose() {
+  COMPOSE_PROJECT_NAME=$PG_PROJECT \
+    docker compose --env-file "$PG_ENV" --profile postgres -f "$ROOT/docker-compose.yml" "$@"
+}
+
+pg_run() {
+  COMPOSE_PROJECT_NAME=$PG_PROJECT \
+    docker compose --env-file "$PG_ENV" -f "$ROOT/docker-compose.yml" \
+    run --rm --no-deps -T --user 1000 "$@"
+}
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" stop nanobot-gateway
+
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/bootstrap.sh" >"$WORKDIR/pg-bootstrap.log"
+scan_secrets "$WORKDIR/pg-bootstrap.log"
+grep -q "Initialized config.json" "$WORKDIR/pg-bootstrap.log"
+
+pg_compose up -d postgres
+pg_ready=0
+for _ in $(seq 1 60); do
+  pg_id=$(pg_compose ps -q postgres || true)
+  pg_health=""
+  if [[ -n "$pg_id" ]]; then
+    pg_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$pg_id" || true)
+  fi
+  if [[ "$pg_health" == "healthy" ]]; then
+    pg_ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$pg_ready" != "1" ]]; then
+  pg_compose logs >"$WORKDIR/pg-logs.txt" || true
+  scan_secrets "$WORKDIR/pg-logs.txt" || id42_die "postgres logs contained a database secret"
+  tail -n 80 "$WORKDIR/pg-logs.txt" >&2 || true
+  id42_die "postgres did not become ready"
+fi
+
+pg_run --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
+  nanobot-gateway - <<'PY' | tee "$WORKDIR/pg-migrate.out"
+import id42_agent.mcp_host as host
+
+backend, version = host.storage_status()
+if backend != "postgres" or not isinstance(version, int) or version < 1:
+    raise SystemExit(f"schema is {backend} {version}")
+print(f"migrated backend={backend} schema={version}")
+PY
+sed -i 's/\r$//' "$WORKDIR/pg-migrate.out"
+scan_secrets "$WORKDIR/pg-migrate.out"
+grep -q '^migrated backend=postgres ' "$WORKDIR/pg-migrate.out" \
+  || id42_die "postgres schema was not created before the gateway started"
+
+pg_compose up -d nanobot-gateway
+gw_ready=0
+for _ in $(seq 1 60); do
+  code=$(curl --silent --output "$WORKDIR/pg-health.json" --write-out "%{http_code}" --max-time 5 http://127.0.0.1:18790/health || true)
+  if [[ "$code" == "200" ]] && python3 - "$WORKDIR/pg-health.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+raise SystemExit(0 if payload.get("ready") is True and payload.get("status") == "ok" else 1)
+PY
+  then
+    gw_ready=1
+    break
+  fi
+  sleep 5
+done
+if [[ "$gw_ready" != "1" ]]; then
+  pg_compose logs >"$WORKDIR/pg-logs.txt" || true
+  scan_secrets "$WORKDIR/pg-logs.txt" || id42_die "postgres logs contained a database secret"
+  tail -n 80 "$WORKDIR/pg-logs.txt" >&2 || true
+  id42_die "postgres-profile gateway did not become ready"
+fi
+
+pg_run --entrypoint /app/.venv/bin/python nanobot-gateway - start-note "pg-approve-note" "pg-approve" \
+  <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/pg-approve-start.out"
+sed -i 's/\r$//' "$WORKDIR/pg-approve-start.out"
+scan_secrets "$WORKDIR/pg-approve-start.out"
+pg_exec=$(awk -F= '/^execution_id=/{print $2}' "$WORKDIR/pg-approve-start.out")
+pg_status=$(awk -F= '/^status=/{print $2}' "$WORKDIR/pg-approve-start.out")
+[[ -n "$pg_exec" && "$pg_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "postgres note did not wait for approval"
+
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/work-approve.sh" list | tee "$WORKDIR/pg-approve-list.out"
+sed -i 's/\r$//' "$WORKDIR/pg-approve-list.out"
+scan_secrets "$WORKDIR/pg-approve-list.out"
+pg_approval=$(approval_id_for "$WORKDIR/pg-approve-list.out" "$pg_exec") \
+  || id42_die "work-approve.sh list did not include the postgres note"
+require_pending_line "$WORKDIR/pg-approve-list.out" "$pg_exec"
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/work-approve.sh" approve "$pg_approval" --reason "postgres" \
+  | tee "$WORKDIR/pg-approve-decision.out"
+sed -i 's/\r$//' "$WORKDIR/pg-approve-decision.out"
+scan_secrets "$WORKDIR/pg-approve-decision.out"
+grep -q "execution_status=COMPLETED" "$WORKDIR/pg-approve-decision.out" \
+  || id42_die "postgres approval did not resume to COMPLETED"
+grep -q "resumed=true" "$WORKDIR/pg-approve-decision.out" \
+  || id42_die "postgres approval did not resume in a second process"
+grep -q "decision_actor_id=id42-operator" "$WORKDIR/pg-approve-decision.out" \
+  || id42_die "postgres approval did not record id42-operator"
+pg_run --entrypoint /app/.venv/bin/python nanobot-gateway - execution-status "$pg_exec" \
+  <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/pg-approve-status.out"
+sed -i 's/\r$//' "$WORKDIR/pg-approve-status.out"
+scan_secrets "$WORKDIR/pg-approve-status.out"
+grep -qx "status=COMPLETED" "$WORKDIR/pg-approve-status.out" \
+  || id42_die "postgres note is not COMPLETED in a later process"
+echo "OK postgres approval resumes across processes"
+
+pg_run --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
+  nanobot-gateway - crash before "pg-recon-note" "pg-recon" \
+  <"$ROOT/scripts/lib/reconcile_crash.py" | tee "$WORKDIR/pg-crash.out"
+sed -i 's/\r$//' "$WORKDIR/pg-crash.out"
+scan_secrets "$WORKDIR/pg-crash.out"
+pg_recon=$(crash_field execution_id "$WORKDIR/pg-crash.out")
+pg_action=$(crash_field action_id "$WORKDIR/pg-crash.out")
+require_field "$WORKDIR/pg-crash.out" journal_status UNCERTAIN
+require_field "$WORKDIR/pg-crash.out" note_count 0
+[[ -n "$pg_recon" && -n "$pg_action" ]] || id42_die "postgres crash returned no ids"
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/work-reconcile.sh" abandon "$pg_recon" "$pg_action" \
+  --reason "postgres" | tee "$WORKDIR/pg-abandon.out"
+sed -i 's/\r$//' "$WORKDIR/pg-abandon.out"
+scan_secrets "$WORKDIR/pg-abandon.out"
+grep -q "abandoned execution_id=${pg_recon} " "$WORKDIR/pg-abandon.out" \
+  || id42_die "postgres reconcile did not abandon the call"
+grep -q "journal_status=ABANDONED" "$WORKDIR/pg-abandon.out" \
+  || id42_die "postgres reconcile did not report ABANDONED"
+grep -q "decision_actor_id=id42-operator" "$WORKDIR/pg-abandon.out" \
+  || id42_die "postgres reconcile did not record id42-operator"
+pg_run --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
+  nanobot-gateway - inspect "$pg_recon" "pg-recon-note" \
+  <"$ROOT/scripts/lib/reconcile_crash.py" | tee "$WORKDIR/pg-inspect.out"
+sed -i 's/\r$//' "$WORKDIR/pg-inspect.out"
+scan_secrets "$WORKDIR/pg-inspect.out"
+require_field "$WORKDIR/pg-inspect.out" journal_status ABANDONED
+require_field "$WORKDIR/pg-inspect.out" status FAILED
+echo "OK postgres reconciliation abandons one uncertain note"
+
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/work-rotate-key.sh" | tee "$WORKDIR/pg-rotate.out"
+sed -i 's/\r$//' "$WORKDIR/pg-rotate.out"
+scan_secrets "$WORKDIR/pg-rotate.out"
+if grep -q 'id42a1\.' "$WORKDIR/pg-rotate.out"; then
+  id42_die "postgres key rotation printed an actor credential"
+fi
+pg_rotated=$(auth_field signing_key_id "$WORKDIR/pg-rotate.out")
+[[ "$pg_rotated" =~ ^[0-9a-f]{16}$ ]] || id42_die "postgres key rotation did not print a key id"
+
+pg_run --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
+  nanobot-gateway - <<'PY' | tee "$WORKDIR/pg-files.out"
+import stat
+from pathlib import Path
+
+store = Path("/var/lib/id42-work")
+if (store / "work.sqlite").exists():
+    raise SystemExit("sqlite file was created for the postgres backend")
+key = store / "authority.key"
+if not key.is_file() or key.is_symlink():
+    raise SystemExit("authority key file is missing")
+mode = stat.S_IMODE(key.stat().st_mode)
+if mode != 0o600:
+    raise SystemExit(f"authority key mode is {mode:03o}")
+print("postgres-files-ok")
+PY
+sed -i 's/\r$//' "$WORKDIR/pg-files.out"
+scan_secrets "$WORKDIR/pg-files.out"
+grep -qx "postgres-files-ok" "$WORKDIR/pg-files.out" \
+  || id42_die "postgres run did not keep the authority key on the data volume"
+
+ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
+  "$ROOT/scripts/doctor.sh" >"$WORKDIR/pg-doctor.out" 2>"$WORKDIR/pg-doctor.err" || true
+scan_secrets "$WORKDIR/pg-doctor.out" "$WORKDIR/pg-doctor.err"
+if ! grep -q "OK: id42-work storage backend is postgres" "$WORKDIR/pg-doctor.out"; then
+  cat "$WORKDIR/pg-doctor.err" >&2
+  id42_die "doctor did not report the postgres backend"
+fi
+if ! grep -q "OK: id42-work postgres storage is reachable" "$WORKDIR/pg-doctor.out"; then
+  cat "$WORKDIR/pg-doctor.err" >&2
+  id42_die "doctor did not confirm postgres connectivity"
+fi
+if ! grep -q "OK: id42-work storage config matches ID42_WORK_STORAGE" "$WORKDIR/pg-doctor.out"; then
+  cat "$WORKDIR/pg-doctor.err" >&2
+  id42_die "doctor did not confirm the postgres storage config"
+fi
+if ! grep -q "OK: postgres service publishes no host port" "$WORKDIR/pg-doctor.out"; then
+  cat "$WORKDIR/pg-doctor.err" >&2
+  id42_die "doctor did not confirm that postgres publishes no host port"
+fi
+echo "OK doctor reports postgres and reaches it without printing the URL"
+
+pg_compose logs >"$WORKDIR/pg-logs.txt" || true
+scan_secrets "$WORKDIR/pg-logs.txt"
+echo "OK postgres profile keeps secrets out of the smoke output"
 echo "smoke test passed"

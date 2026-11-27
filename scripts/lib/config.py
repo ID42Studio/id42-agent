@@ -15,6 +15,7 @@ import secrets
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -30,6 +31,8 @@ ENV_KEYS = (
     "ID42_WORK_FACTORY",
     "ID42_WORK_PYTHONPATH",
     "ID42_WORK_AUTHORITY_KEY_PATH",
+    "ID42_WORK_STORAGE",
+    "ID42_WORK_DATABASE_URL",
 )
 
 # Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
@@ -39,8 +42,13 @@ _DEFAULT_WORK_FACTORY = "id42_agent.mcp_host:server"
 _WORK_TOOL_TIMEOUT = 120
 _IMAGE_PYTHONPATH = "/opt/id42-agent"
 _AUTHORITY_ENV = "ID42_WORK_AUTHORITY_KEY_PATH"
+_STORAGE_ENV = "ID42_WORK_STORAGE"
+_DATABASE_ENV = "ID42_WORK_DATABASE_URL"
 # Keep in sync with docker/id42_agent/mcp_host.py DEFAULT_AUTHORITY_KEY.
 _DEFAULT_AUTHORITY_KEY = "/var/lib/id42-work/authority.key"
+# Keep in sync with docker/id42_agent/mcp_host.py storage_backend.
+_STORAGE_SQLITE = "sqlite"
+_STORAGE_POSTGRES = "postgres"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -193,6 +201,72 @@ def _authority_key_path(raw: str) -> str:
     return value
 
 
+def _database_url_error(value: str) -> str | None:
+    """Return an error when value is not a Postgres target, else None.
+
+    Keep the rules in sync with docker/id42_agent/mcp_host.py. The message
+    does not include the value.
+    """
+    if not value:
+        return f"{_DATABASE_ENV} is required when {_STORAGE_ENV}=postgres"
+    if any(char in value for char in "\r\n"):
+        return f"{_DATABASE_ENV} must be a single line"
+    if "://" in value:
+        if any(char.isspace() for char in value):
+            return f"{_DATABASE_ENV} must be a postgres URL or a libpq connection string"
+        parsed = urlparse(value)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            return f"{_DATABASE_ENV} must name a postgres host"
+        return None
+    hosts: list[str] = []
+    for part in value.split():
+        if "=" not in part:
+            return f"{_DATABASE_ENV} must be a postgres URL or a libpq connection string"
+        key, _, raw = part.partition("=")
+        if key.lower() in {"host", "hostaddr"}:
+            hosts.append(raw.strip("'\""))
+    if not hosts:
+        return f"{_DATABASE_ENV} must name a postgres host"
+    for host in hosts:
+        if host == "/home" or host.startswith("/home/") or host == "/root" or host.startswith("/root/"):
+            return f"{_DATABASE_ENV} must not use a socket under /home or /root"
+    return None
+
+
+def _storage_choice(storage_raw: str, url_raw: str) -> tuple[str, str]:
+    """Return ``(sqlite|postgres, url)``. SQLite drops the URL."""
+    storage = storage_raw.strip().lower()
+    if storage in {"", _STORAGE_SQLITE}:
+        return _STORAGE_SQLITE, ""
+    if storage != _STORAGE_POSTGRES:
+        raise ConfigError(f"{_STORAGE_ENV} must be sqlite or postgres")
+    url = url_raw.strip()
+    error = _database_url_error(url)
+    if error:
+        raise ConfigError(error)
+    return _STORAGE_POSTGRES, url
+
+
+def _mcp_storage_errors(extra_env: Mapping[str, str]) -> list[str]:
+    """Reject a storage env map the factory would not open. No secret text."""
+    storage = extra_env.get(_STORAGE_ENV, "").strip()
+    url = extra_env.get(_DATABASE_ENV, "").strip()
+    if not storage and not url:
+        return []
+    if storage.lower() in {"", _STORAGE_SQLITE}:
+        if url:
+            return [f"{_DATABASE_ENV} is set only when {_STORAGE_ENV}=postgres"]
+        if storage and storage.lower() != _STORAGE_SQLITE:
+            return [f"{_STORAGE_ENV} must be sqlite or postgres"]
+        return []
+    if storage.lower() != _STORAGE_POSTGRES:
+        return [f"{_STORAGE_ENV} must be sqlite or postgres"]
+    error = _database_url_error(url)
+    if error:
+        return [error]
+    return []
+
+
 def _work_pythonpath(raw: str) -> str:
     """Return the MCP process PYTHONPATH. Empty means inherit the image default."""
     value = raw.strip()
@@ -221,6 +295,10 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     factory_raw = env["ID42_WORK_FACTORY"]
     pythonpath_raw = env["ID42_WORK_PYTHONPATH"]
     key_path = _authority_key_path(env.get(_AUTHORITY_ENV, ""))
+    storage, database_url = _storage_choice(
+        env.get(_STORAGE_ENV, ""),
+        env.get(_DATABASE_ENV, ""),
+    )
     if not enabled:
         if factory_raw.strip():
             _work_factory(factory_raw)
@@ -230,9 +308,14 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     # nanobot's stdio client inherits PATH and HOME, not the gateway environment.
     # The default factory is imported from /opt/id42-agent. An unset key path
     # stays out of this map: the factory then uses /var/lib/id42-work/authority.key.
+    # SQLite is the default, so those keys stay out of the map unless Postgres
+    # is selected. The database URL is a secret and is written only then.
     server_env = {"PYTHONPATH": _work_pythonpath(pythonpath_raw) or _IMAGE_PYTHONPATH}
     if key_path:
         server_env[_AUTHORITY_ENV] = key_path
+    if storage == _STORAGE_POSTGRES:
+        server_env[_STORAGE_ENV] = _STORAGE_POSTGRES
+        server_env[_DATABASE_ENV] = database_url
     server: dict[str, object] = {
         "command": "id42-work",
         "args": ["mcp", "serve", "--factory", _work_factory(factory_raw)],
@@ -299,6 +382,10 @@ def mcp_server_errors(server: object) -> list[str]:
         key_error = _authority_key_error(extra_env[_AUTHORITY_ENV].strip())
         if key_error:
             errors.append(f"{label}.env.{key_error}")
+    if isinstance(extra_env, dict):
+        string_env = {key: value for key, value in extra_env.items() if isinstance(value, str)}
+        for item in _mcp_storage_errors(string_env):
+            errors.append(f"{label}.env: {item}")
     return errors
 
 
@@ -542,18 +629,30 @@ def assert_volume() -> None:
     print(f"config-ok token_sha256={digest}")
 
 
+def _append_secret(found: list[str], value: object) -> None:
+    if isinstance(value, str) and value.strip():
+        found.append(value.strip())
+
+
 def _secret_values(document: dict[str, object]) -> list[str]:
     found: list[str] = []
     channels = document.get("channels")
-    if not isinstance(channels, dict):
-        return found
-    websocket = channels.get("websocket")
-    telegram = channels.get("telegram")
-    for section, key in ((websocket, "tokenIssueSecret"), (telegram, "token")):
-        if isinstance(section, dict) and isinstance(section.get(key), str):
-            secret = section[key].strip()
-            if secret:
-                found.append(secret)
+    if isinstance(channels, dict):
+        websocket = channels.get("websocket")
+        telegram = channels.get("telegram")
+        for section, key in ((websocket, "tokenIssueSecret"), (telegram, "token")):
+            if isinstance(section, dict):
+                _append_secret(found, section.get(key))
+    tools = document.get("tools")
+    servers = tools.get("mcpServers") if isinstance(tools, dict) else None
+    server = servers.get("id42-work") if isinstance(servers, dict) else None
+    extra = server.get("env") if isinstance(server, dict) else None
+    url = extra.get(_DATABASE_ENV) if isinstance(extra, dict) else None
+    if isinstance(url, str) and url.strip():
+        _append_secret(found, url)
+        if "://" in url:
+            password = urlparse(url).password
+            _append_secret(found, password)
     return found
 
 
@@ -608,6 +707,8 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             "id42_work_pythonpath_set": bool(picked["ID42_WORK_PYTHONPATH"].strip()),
             "ID42_WORK_AUTHORITY_KEY_PATH": picked["ID42_WORK_AUTHORITY_KEY_PATH"].strip()
             or _DEFAULT_AUTHORITY_KEY,
+            "ID42_WORK_STORAGE": (picked["ID42_WORK_STORAGE"].strip().lower() or _STORAGE_SQLITE),
+            "id42_work_database_url_set": bool(picked["ID42_WORK_DATABASE_URL"].strip()),
         }
     if config_path is not None and config_path.is_file():
         document = _load_json(config_path)

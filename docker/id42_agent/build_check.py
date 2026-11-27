@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -67,7 +68,28 @@ def _check_authority_key(server: object) -> None:
             os.chmod(key, 0o600)
 
 
+def _check_postgres_extra() -> None:
+    """The id42-work venv has PostgresStorage. The nanobot venv does not."""
+    import psycopg
+    from id42_work.storage.postgres import PostgresStorage
+
+    if PostgresStorage.__name__ != "PostgresStorage":
+        raise SystemExit("postgres extra did not export PostgresStorage")
+    del psycopg
+    nanobot = "/app/.venv/bin/python"
+    for statement in ("import psycopg", "import id42_work"):
+        completed = subprocess.run(
+            [nanobot, "-c", statement],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            raise SystemExit(f"nanobot virtualenv can run {statement}")
+
+
 def main() -> None:
+    _check_postgres_extra()
     server = host.server()
     _check_authority_key(server)
     listed = asyncio.run(server.list_works())

@@ -35,7 +35,7 @@ Equivalent commands:
 docker compose up -d nanobot-gateway
 ```
 
-The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`, then installs `id42-work[mcp]` at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`. `make build` is `docker compose build nanobot-upstream nanobot-gateway`.
+The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`, then installs `id42-work[mcp,postgres]` at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`. `make build` is `docker compose build nanobot-upstream nanobot-gateway`.
 
 Init then:
 
@@ -71,7 +71,7 @@ make doctor
 make status
 ```
 
-`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that the ID42 Work store is writable and mounted, that `id42-work mcp serve` answers on stdio and lists `echo`, `note`, and `note.list`, that the image pin matches `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`, that the authority key file is absent or mode `0600`, that `id42-work approvals` and `id42-work reconcile` are on `PATH`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token, the WebUI token, or the authority key.
+`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that the ID42 Work store is writable and mounted, which storage backend is active, and that backend's connectivity. SQLite opens the file on the volume. Postgres must answer, and its container must not publish a host port. It never prints the database URL. It checks that `id42-work mcp serve` answers on stdio and lists `echo`, `note`, and `note.list`, that the image pin matches `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`, that the authority key file is absent or mode `0600`, that `id42-work approvals` and `id42-work reconcile` are on `PATH`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token, the WebUI token, or the authority key.
 
 ## Stop
 
