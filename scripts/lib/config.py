@@ -29,6 +29,7 @@ ENV_KEYS = (
     "ID42_WORK_ENABLED",
     "ID42_WORK_FACTORY",
     "ID42_WORK_PYTHONPATH",
+    "ID42_WORK_AUTHORITY_KEY_PATH",
 )
 
 # Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
@@ -37,6 +38,9 @@ _FACTORY_RE = re.compile(r"\A[A-Za-z_][\w.]*:[A-Za-z_]\w*\Z")
 _DEFAULT_WORK_FACTORY = "id42_agent.mcp_host:server"
 _WORK_TOOL_TIMEOUT = 120
 _IMAGE_PYTHONPATH = "/opt/id42-agent"
+_AUTHORITY_ENV = "ID42_WORK_AUTHORITY_KEY_PATH"
+# Keep in sync with docker/id42_agent/mcp_host.py DEFAULT_AUTHORITY_KEY.
+_DEFAULT_AUTHORITY_KEY = "/var/lib/id42-work/authority.key"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -164,6 +168,31 @@ def _work_factory(raw: str) -> str:
     return factory
 
 
+def _authority_key_error(value: str) -> str | None:
+    """Return an error when value is not an absolute key path, else None.
+
+    An empty value means the factory default. The path is not secret.
+    """
+    if not value:
+        return None
+    if any(char.isspace() for char in value) or not value.startswith("/") or value.endswith("/"):
+        return f"{_AUTHORITY_ENV} must be an absolute file path"
+    parts = [part for part in value.split("/") if part]
+    if not parts or ".." in parts:
+        return f"{_AUTHORITY_ENV} must be an absolute file path"
+    if parts[0] in {"home", "root"}:
+        return f"{_AUTHORITY_ENV} must not live under /home or /root"
+    return None
+
+
+def _authority_key_path(raw: str) -> str:
+    value = raw.strip()
+    error = _authority_key_error(value)
+    if error:
+        raise ConfigError(error)
+    return value
+
+
 def _work_pythonpath(raw: str) -> str:
     """Return the MCP process PYTHONPATH. Empty means inherit the image default."""
     value = raw.strip()
@@ -191,19 +220,24 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     enabled = _parse_bool("ID42_WORK_ENABLED", env["ID42_WORK_ENABLED"] or "false")
     factory_raw = env["ID42_WORK_FACTORY"]
     pythonpath_raw = env["ID42_WORK_PYTHONPATH"]
+    key_path = _authority_key_path(env.get(_AUTHORITY_ENV, ""))
     if not enabled:
         if factory_raw.strip():
             _work_factory(factory_raw)
         if pythonpath_raw.strip():
             _work_pythonpath(pythonpath_raw)
         return None
+    # nanobot's stdio client inherits PATH and HOME, not the gateway environment.
+    # The default factory is imported from /opt/id42-agent. An unset key path
+    # stays out of this map: the factory then uses /var/lib/id42-work/authority.key.
+    server_env = {"PYTHONPATH": _work_pythonpath(pythonpath_raw) or _IMAGE_PYTHONPATH}
+    if key_path:
+        server_env[_AUTHORITY_ENV] = key_path
     server: dict[str, object] = {
         "command": "id42-work",
         "args": ["mcp", "serve", "--factory", _work_factory(factory_raw)],
         "toolTimeout": _WORK_TOOL_TIMEOUT,
-        # nanobot's stdio client inherits PATH and HOME, not PYTHONPATH.
-        # The default factory is imported from /opt/id42-agent.
-        "env": {"PYTHONPATH": _work_pythonpath(pythonpath_raw) or _IMAGE_PYTHONPATH},
+        "env": server_env,
     }
     return server
 
@@ -261,6 +295,10 @@ def mcp_server_errors(server: object) -> list[str]:
             if not part.startswith("/") or ".." in part.split("/"):
                 errors.append(f"{label}.env.PYTHONPATH must be absolute paths")
                 break
+    if isinstance(extra_env, dict) and _AUTHORITY_ENV in extra_env:
+        key_error = _authority_key_error(extra_env[_AUTHORITY_ENV].strip())
+        if key_error:
+            errors.append(f"{label}.env.{key_error}")
     return errors
 
 
@@ -568,6 +606,8 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             "ID42_WORK_ENABLED": picked["ID42_WORK_ENABLED"] or "false",
             "ID42_WORK_FACTORY": picked["ID42_WORK_FACTORY"],
             "id42_work_pythonpath_set": bool(picked["ID42_WORK_PYTHONPATH"].strip()),
+            "ID42_WORK_AUTHORITY_KEY_PATH": picked["ID42_WORK_AUTHORITY_KEY_PATH"].strip()
+            or _DEFAULT_AUTHORITY_KEY,
         }
     if config_path is not None and config_path.is_file():
         document = _load_json(config_path)

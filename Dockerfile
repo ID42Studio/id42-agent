@@ -13,7 +13,7 @@ ENV PYTHONPATH=/opt/id42-agent
 ENV ID42_WORK_VENV=/opt/id42-work/venv
 
 # Full commit of ID42Studio/id42-work. Override with --build-arg ID42_WORK_REF.
-ARG ID42_WORK_REF=4dc4cef40affc3baaa563f59564b143827f8f3d7
+ARG ID42_WORK_REF=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
 
 RUN set -eu; \
     case "$ID42_WORK_REF" in \
@@ -36,7 +36,13 @@ RUN set -eu; \
       /tmp/id42-work-build.sqlite /tmp/id42-work-build.sqlite-wal /tmp/id42-work-build.sqlite-shm \
       /tmp/id42-notes-legacy.jsonl /tmp/id42-notes-legacy.jsonl.lock \
       /tmp/id42-notes-build.jsonl /tmp/id42-notes-build.jsonl.lock \
-      /tmp/id42-notes-dir.lock; \
-    rmdir /tmp/id42-notes-dir
+      /tmp/id42-notes-dir.lock \
+      /var/lib/id42-work/authority.key /var/lib/id42-work/authority.key.lock \
+      /tmp/notes.jsonl /tmp/notes.jsonl.lock; \
+    rmdir /tmp/id42-notes-dir; \
+    if [ -e /var/lib/id42-work/authority.key ] || [ -e /var/lib/id42-work/authority.key.lock ]; then \
+      echo "id42-agent: authority key material survived the image build" >&2; \
+      exit 1; \
+    fi
 
 USER root

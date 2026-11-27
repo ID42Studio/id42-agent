@@ -143,6 +143,9 @@ class _Session:
         return b"".join(self.stderr_chunks)
 
     def fail(self, message: str) -> None:
+        # The child can exit and close stdout before this thread has read
+        # stderr. Stop it and join the reader first, or the refusal is lost.
+        self.close()
         _fail(message, self.stderr())
 
     def close(self) -> None:

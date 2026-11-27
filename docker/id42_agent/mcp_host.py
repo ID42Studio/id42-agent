@@ -30,13 +30,22 @@ grant for ``OPERATOR_ID`` when an operator decides, and only that grant.
 The database file is ``/var/lib/id42-work/work.sqlite`` unless
 ``ID42_WORK_STORE`` is an absolute path outside ``/home`` and ``/root``.
 Compose mounts a named volume there. The file survives a container restart.
-``id42_agent.mcp_stub:server`` is the empty in-memory factory.
+``id42_agent.mcp_stub:server`` is the empty in-memory factory. It does not
+use this key file.
 
-Actor seals are not stored. id42-work keeps the sealing key in process
-memory. Executions record ``actor_id`` and ``tenant_id``, so a new process
-that issues those same ids can resume. This factory does not seal the
-operator. The approvals command and the reconcile command do, from the
-authority on the server, each with only the grant that decision needs.
+The HMAC key lives in one file on that volume, mode ``0600``. The default
+path is ``/var/lib/id42-work/authority.key``. ``ID42_WORK_AUTHORITY_KEY_PATH``
+overrides it and must be absolute. ``ActorAuthority`` does not read the
+environment; this module does, through ``authority_key_path_from_env``.
+The file is created on first use. A symlink, a mode other than ``0600``,
+and a world-writable directory are refused. Nothing here prints key bytes
+or an actor credential.
+
+Executions still record ``actor_id`` and ``tenant_id``. The approvals
+command and the reconcile command load this same factory, so they seal
+``OPERATOR_ID`` with the same keys. A credential issued in one process
+verifies in the next. This module does not seal the operator. Each
+command does, with only the grant that decision needs.
 """
 
 from __future__ import annotations
@@ -51,6 +60,7 @@ from pathlib import Path
 
 from id42_work import (
     ActorAuthority,
+    AuthorityKeyError,
     AutonomyLevel,
     CapabilityCall,
     CapabilityRegistry,
@@ -66,12 +76,16 @@ from id42_work import (
     Work,
     WorkRegistry,
     WorkRunner,
+    authority_key_path_from_env,
 )
 from id42_work.mcp import WorkMcpServer
 from pydantic import BaseModel, Field, JsonValue
 
 STORE_DIRECTORY = Path("/var/lib/id42-work")
 DEFAULT_STORE = STORE_DIRECTORY / "work.sqlite"
+# One file for the MCP server and for `id42-work approvals` / `reconcile`.
+# Keep the shell default in scripts/lib/common.sh in sync with this path.
+DEFAULT_AUTHORITY_KEY = STORE_DIRECTORY / "authority.key"
 NOTES_NAME = "notes.jsonl"
 MAX_NOTE_CHARS = 2000
 MAX_NOTES_BYTES = 1_048_576
@@ -324,13 +338,87 @@ def store_file() -> Path:
     if not path.is_absolute():
         raise RuntimeError("ID42_WORK_STORE must be an absolute path")
     resolved = path.resolve()
-    for root in _FORBIDDEN_ROOTS:
-        if resolved == root or root in resolved.parents:
-            raise RuntimeError(
-                "ID42_WORK_STORE must not live under /home or /root "
-                "(the agent workspace is inside /home/nanobot)"
-            )
+    _reject_home(resolved, "ID42_WORK_STORE must not live under /home or /root")
     return resolved
+
+
+def authority_key_file() -> Path:
+    """Absolute path of the HMAC key file. An unset env uses the volume default.
+
+    The final path component is not resolved, so a symlink at that name stays
+    a symlink and ``ActorAuthority`` can refuse it. The parent is resolved.
+    """
+    try:
+        chosen = authority_key_path_from_env()
+    except AuthorityKeyError as exc:
+        raise RuntimeError("ID42_WORK_AUTHORITY_KEY_PATH must be an absolute path") from exc
+    path = DEFAULT_AUTHORITY_KEY if chosen is None else Path(chosen)
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise RuntimeError("ID42_WORK_AUTHORITY_KEY_PATH must be an absolute file path")
+    parent = path.parent
+    resolved_parent = parent.resolve() if parent.exists() else parent
+    _reject_home(
+        resolved_parent,
+        "authority key must not live under /home or /root",
+    )
+    _reject_home(path, "authority key must not live under /home or /root")
+    if parent.exists():
+        return resolved_parent / path.name
+    return path
+
+
+def _reject_home(path: Path, message: str) -> None:
+    for root in _FORBIDDEN_ROOTS:
+        if path == root or root in path.parents:
+            raise RuntimeError(
+                f"{message} (the agent workspace is inside /home/nanobot)"
+            )
+
+
+def _inside_store(directory: Path) -> bool:
+    store = STORE_DIRECTORY.resolve() if STORE_DIRECTORY.exists() else STORE_DIRECTORY
+    return directory == store or store in directory.parents
+
+
+def _prepare_key_directory(directory: Path) -> None:
+    """Create a key directory inside the store. Refuse one others can write."""
+    if not directory.exists():
+        if not _inside_store(directory):
+            raise RuntimeError(f"authority key directory does not exist: {directory}")
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+    elif _inside_store(directory) and directory.stat().st_mode & 0o002:
+        try:
+            os.chmod(directory, 0o700)
+        except OSError as exc:
+            raise RuntimeError(
+                f"authority key directory is writable by others: {directory}"
+            ) from exc
+    if not directory.is_dir():
+        raise RuntimeError(f"authority key directory is not a directory: {directory}")
+    if directory.stat().st_mode & 0o002:
+        raise RuntimeError(f"authority key directory is writable by others: {directory}")
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise RuntimeError(f"authority key directory is not writable: {directory}")
+
+
+def open_authority(*, create: bool) -> ActorAuthority:
+    """Authority backed by the shared key file. ``create`` writes it if missing."""
+    path = authority_key_file()
+    _prepare_key_directory(path.parent)
+    return ActorAuthority(AUTHORITY_ID, key_path=path, create_key_file=create)
+
+
+def rotate_authority_key() -> str:
+    """Retire the current signing key and return the new key id.
+
+    The id is not secret. Key bytes are not returned and must not be logged.
+    An in-memory authority cannot be rotated; this factory always has a file.
+    """
+    try:
+        return open_authority(create=False).rotate_keys()
+    except AuthorityKeyError as exc:
+        raise RuntimeError(f"cannot rotate the authority key ({exc.reason})") from None
 
 
 def notes_file(db_path: Path | None = None) -> Path:
@@ -446,7 +534,7 @@ def open_host() -> tuple[WorkRunner, ActorAuthority, SqliteStorage]:
         registry.register(work, executor=executor)
     capabilities = CapabilityRegistry()
     capabilities.add(NoteStore(notes_file(path)))
-    authority = ActorAuthority(AUTHORITY_ID)
+    authority = open_authority(create=True)
     runner = WorkRunner(
         registry=registry,
         policies=StaticPolicyResolver(_policies()),
