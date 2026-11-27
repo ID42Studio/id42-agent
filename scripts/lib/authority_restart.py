@@ -7,7 +7,8 @@ keeps one HMAC key file. Commands:
 - ``seal EXECUTION_ID`` approves the waiting note, writes the operator and
   host credentials next to the key file, and prints ids only.
 - ``verify APPROVAL_ID`` loads the key file in this process and checks those
-  credentials, plus the stored approval.
+  credentials, plus the stored approval. A resumed action consumes the grant,
+  so the stored status is ``CONSUMED``.
 - ``refuse`` exits 0 when the key file is rejected for its permissions.
 - ``wipe`` deletes the credential files and leaves the key file.
 
@@ -128,7 +129,7 @@ def seal(execution_id: str) -> None:
 
 
 def verify(approval_id: str) -> None:
-    """Check the previous seals and the stored approval with a new authority."""
+    """Check the previous seals and the consumed approval with a new authority."""
     try:
         parsed = UUID(approval_id)
     except ValueError:
@@ -152,8 +153,13 @@ def verify(approval_id: str) -> None:
         approval = asyncio.run(storage.approvals.get(parsed))
     finally:
         storage.close()
-    if approval is None or approval.status is not ApprovalStatus.GRANTED:
-        _fail("stored approval is not granted")
+    if approval is None:
+        _fail("stored approval is missing")
+    # Resume consumes the grant when the action runs. GRANTED is only the
+    # in-memory decision returned before that write.
+    if approval.status is not ApprovalStatus.CONSUMED or approval.consumed_at is None:
+        observed = approval.status.value
+        _fail(f"stored approval is {observed}, expected CONSUMED")
     if approval.decision_actor_id != reviewer.actor_id:
         _fail("stored approval was not decided by the verified operator")
     print(f"signing_key_id={authority.signing_key_id}")

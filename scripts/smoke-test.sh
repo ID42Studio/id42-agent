@@ -739,8 +739,8 @@ grep -qx "verified" "$WORKDIR/authority-verify.out" \
   || id42_die "operator seal did not verify in a new process"
 [[ "$(auth_field signing_key_id "$WORKDIR/authority-verify.out")" == "$seal_key" ]] \
   || id42_die "a new process loaded a different authority key"
-[[ "$(auth_field approval_status "$WORKDIR/authority-verify.out")" == "GRANTED" ]] \
-  || id42_die "stored approval was not granted"
+[[ "$(auth_field approval_status "$WORKDIR/authority-verify.out")" == "CONSUMED" ]] \
+  || id42_die "stored approval was not consumed after resume"
 [[ "$(auth_field decision_actor_id "$WORKDIR/authority-verify.out")" == "id42-operator" ]] \
   || id42_die "verified operator does not match the stored decision"
 
