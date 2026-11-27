@@ -2,16 +2,16 @@
 
 The gateway can start [id42-work](https://github.com/ID42Studio/id42-work) as an MCP server. The server is a child process of the gateway. It speaks stdio. It does not open a port.
 
-The package is `id42-work[mcp]` at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`. PyPI publishing is not used. The image installs it from git:
+The package is `id42-work[mcp]` at commit `720013036c9547040118528fdb1d187bdb6f6afb`. PyPI publishing is not used. The image installs it from git:
 
 ```text
-id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@07eaa2a0787c206398b1296091fea1317f1ff27b
+id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@720013036c9547040118528fdb1d187bdb6f6afb
 ```
 
 `make build` passes that commit as the build arg `ID42_WORK_REF`. Set the same name in the environment to build a different commit, then rebuild. Use a full commit SHA. A branch name moves.
 
 ```bash
-ID42_WORK_REF=07eaa2a0787c206398b1296091fea1317f1ff27b make build
+ID42_WORK_REF=720013036c9547040118528fdb1d187bdb6f6afb make build
 ```
 
 ## Why the virtualenv is separate
@@ -71,25 +71,39 @@ An existing `config.json` that already names `id42_agent.mcp_host:server` picks 
 
 ## Approvals
 
-id42-work's MCP server has no approve or reject tool, and `id42-work` has no approve command. Decisions are host code. This image ships `python -m id42_agent.approve`, run with the id42-work interpreter so it can import the SDK:
+The MCP server has no approve or reject tool. Decisions use `id42-work approvals`, which needs the `mcp` extra already installed in this image. The command loads the same factory contract as `mcp serve`. It is host code, run in its own process.
 
 ```bash
-./scripts/work-approve.sh pending
+id42-work approvals list --factory id42_agent.mcp_host:server
+id42-work approvals show APPROVAL_ID --factory id42_agent.mcp_host:server
+id42-work approvals approve APPROVAL_ID \
+  --factory id42_agent.mcp_host:server --actor id42-operator --reason "checked" --resume
+id42-work approvals reject APPROVAL_ID \
+  --factory id42_agent.mcp_host:server --actor id42-operator --reason "no"
+```
+
+The command seals `--actor` in the execution's tenant with only that approval's reviewer grant. For `note` the default grant is `approve:note`. The operator id is `id42-operator`. The execution actor is `id42-agent`. `--resume` continues as the factory's host actor, which performs `notes.append`, and the execution reaches `COMPLETED` when that call succeeds. `reject` ends the execution as `REJECTED`. A second decision on the same approval is refused. `WAITING_REVIEW`, the state for an OUTCOME gate, is accepted. This factory does not request an OUTCOME gate.
+
+`scripts/work-approve.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent`. `approve` adds `--resume`, matching the previous helper: a grant is followed by the host actor's resume.
+
+```bash
+./scripts/work-approve.sh list
+./scripts/work-approve.sh show APPROVAL_ID
 ./scripts/work-approve.sh approve APPROVAL_ID --reason "checked"
 ./scripts/work-approve.sh reject APPROVAL_ID --reason "no"
 ```
 
-`approve` grants the decision as actor `id42-operator` (grant `approve:note` only) and then resumes the execution as `id42-agent`, which is the call that performs `notes.append`. The reviewer and the execution actor are different ids, which is what id42-work requires. `reject` ends the execution as `REJECTED`.
+`pending` is accepted as another name for `list`. The script always passes `--factory id42_agent.mcp_host:server` and, for a decision, `--actor id42-operator`. It does not read `ID42_WORK_FACTORY`.
 
-The helper is not registered as an MCP tool. The model cannot invoke it while the shell tool is off.
+The command is not an MCP tool. The model cannot invoke it while the shell tool is off.
 
-Actor seals are not stored. id42-work keeps the sealing key in process memory and generates a new one on every process. Executions record `actor_id` and `tenant_id`, so a later process that issues those same ids can resume, and `id42-operator` can still approve.
+Actor seals are not stored. id42-work keeps the sealing key in process memory and generates a new one on every process. Executions record `actor_id` and `tenant_id`, so a later process that issues those same ids can resume, and a later process can seal `id42-operator` again.
 
 ## Gaps in id42-work
 
-Left as they are at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`:
+Left as they are at commit `720013036c9547040118528fdb1d187bdb6f6afb`:
 
-- No approve or reject tool, and no CLI for a decision. The helper above lives in this repository.
+- No approve or reject tool on the MCP server. The CLI above is the decision path. This repository does not add a WebUI for it.
 - `ActorAuthority` keys stay in memory. There is no durable seal to reload.
 - An `IN_FLIGHT` capability call becomes `UNCERTAIN` after a crash. There is no reconciliation tool. The note provider does not retry a write it cannot prove.
 - `PostgresStorage` needs the `postgres` extra. This image does not install it.
@@ -138,6 +152,6 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 ## Checks
 
-`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It also reads `/opt/id42-agent/ID42_WORK_REF`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
+`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `720013036c9547040118528fdb1d187bdb6f6afb`. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
-The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`.
+The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself.

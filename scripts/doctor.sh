@@ -182,14 +182,33 @@ fi
 rm -f "$probe_out"
 
 if [[ -n "$container_id" ]]; then
+  # Keep in sync with the Dockerfile default for ID42_WORK_REF.
+  expected_pin=720013036c9547040118528fdb1d187bdb6f6afb
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
   pin=${pin//$'\r'/}
   pin=${pin//$'\n'/}
-  if [[ ! "$pin" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    bad "id42-work pin file is missing or invalid"
+  if [[ "$pin" != "$expected_pin" ]]; then
+    bad "id42-work pin is ${pin:-missing}, expected $expected_pin"
   else
     good "id42-work pin is $pin"
   fi
+
+  help_out=$(mktemp)
+  if "${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway \
+    /usr/local/bin/id42-work approvals approve --help >"$help_out" 2>&1 \
+    && grep -q -- '--factory' "$help_out" \
+    && grep -q -- '--actor' "$help_out" \
+    && grep -q -- '--resume' "$help_out" \
+    && grep -q -- '--reason' "$help_out"
+  then
+    good "id42-work approvals command is available"
+  else
+    bad "id42-work approvals command is missing or has no --factory, --actor, --reason, or --resume"
+    if [[ -s "$help_out" ]]; then
+      tail -n 20 "$help_out" >&2 || true
+    fi
+  fi
+  rm -f "$help_out"
 
   work_enabled=$(
     python3 - "$ENV_FILE" "$ROOT/scripts/lib" <<'PY'

@@ -8,8 +8,10 @@ workspace and outside any home directory:
 - ``note.list`` reads notes already stored. Read-only, no approval.
 - ``note`` appends one note through the side-effecting capability
   ``notes.append``. Autonomy is supervised, so the call waits for approval.
-  The MCP client cannot approve. ``id42_agent.approve`` decides in another
-  process.
+  The MCP client cannot approve. ``id42-work approvals`` decides in another
+  process. It seals ``OPERATOR_ID`` with only that approval's reviewer grant
+  (``approve:note`` for this work). ``--resume`` continues as the host actor
+  issued here.
 
 The database file is ``/var/lib/id42-work/work.sqlite`` unless
 ``ID42_WORK_STORE`` is an absolute path outside ``/home`` and ``/root``.
@@ -18,7 +20,8 @@ Compose mounts a named volume there. The file survives a container restart.
 
 Actor seals are not stored. id42-work keeps the sealing key in process
 memory. Executions record ``actor_id`` and ``tenant_id``, so a new process
-that issues those same ids can resume, and a different actor id can approve.
+that issues those same ids can resume. This factory does not seal the
+operator. The approvals command does, from the authority on the server.
 """
 
 from __future__ import annotations
@@ -47,7 +50,6 @@ from id42_work import (
     WorkRegistry,
     WorkRunner,
 )
-from id42_work.identifiers import approve_grant
 from id42_work.mcp import WorkMcpServer
 from pydantic import BaseModel, Field, JsonValue
 
@@ -57,6 +59,8 @@ NOTES_NAME = "notes.jsonl"
 MAX_NOTE_CHARS = 2000
 MAX_NOTES_BYTES = 1_048_576
 ACTOR_ID = "id42-agent"
+# scripts/work-approve.sh passes this id to `id42-work approvals --actor`.
+# The command seals it. This module does not.
 OPERATOR_ID = "id42-operator"
 TENANT_ID = "local"
 AUTHORITY_ID = "id42-agent"
@@ -69,6 +73,8 @@ WORK_VERSION = "1.0.0"
 # Keep in sync with scripts/lib/mcp_probe.py (_DEFAULT_WORKS).
 DEFAULT_WORK_IDS = (WORK_ECHO, WORK_NOTE, WORK_NOTE_LIST)
 _AGENT_GRANTS = frozenset({NOTES_APPEND, NOTES_READ})
+if OPERATOR_ID == ACTOR_ID:
+    raise RuntimeError("OPERATOR_ID and ACTOR_ID must differ")
 _FORBIDDEN_ROOTS = (Path("/home"), Path("/root"))
 _LIMITS = ExecutionLimits(timeout=timedelta(seconds=30))
 
@@ -278,21 +284,15 @@ def notes_file(db_path: Path | None = None) -> Path:
 
 
 def issue_agent(authority: ActorAuthority) -> TrustedActor:
-    """Actor the MCP server issues. It can run works. It cannot approve them."""
+    """Actor the MCP server issues. It can run works. It cannot approve them.
+
+    ``id42-work approvals --resume`` calls this through ``WorkMcpServer.host_actor``.
+    The operator (``OPERATOR_ID``) is sealed by that command, not here.
+    """
     return authority.issue(
         actor_id=ACTOR_ID,
         tenant_id=TENANT_ID,
         grants=_AGENT_GRANTS,
-        ttl=timedelta(minutes=5),
-    )
-
-
-def issue_operator(authority: ActorAuthority) -> TrustedActor:
-    """Reviewer for ``note``. A different actor id from the execution actor."""
-    return authority.issue(
-        actor_id=OPERATOR_ID,
-        tenant_id=TENANT_ID,
-        grants=frozenset({approve_grant(WORK_NOTE)}),
         ttl=timedelta(minutes=5),
     )
 
@@ -344,7 +344,7 @@ def _works() -> tuple[tuple[Work, object], ...]:
             "Append one note to the host store outside the agent workspace. "
             "This calls the side-effecting capability notes.append and waits for approval. "
             "Pass an idempotency_key. There is no approve tool. A person decides outside "
-            "this server, then call resume_execution."
+            "this server with id42-work approvals. resume_execution does not decide."
         ),
         input_schema=NoteInput,
         output_schema=NoteOutput,

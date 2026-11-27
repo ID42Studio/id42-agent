@@ -11,7 +11,7 @@ This repository does not fork the agent. It pins one upstream commit, builds tha
 | Upstream | `HKUDS/nanobot` |
 | Release | `v0.4.2` |
 | Commit | `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` |
-| ID42 Work | `07eaa2a0787c206398b1296091fea1317f1ff27b` (`id42-work[mcp]`) |
+| ID42 Work | `720013036c9547040118528fdb1d187bdb6f6afb` (`id42-work[mcp]`) |
 
 Do not track `main`. There is no official published image. Compose builds the upstream Dockerfile with `NANOBOT_CHANNELS=telegram`, then installs the pinned id42-work commit into a separate virtualenv. Override that commit with the build arg `ID42_WORK_REF`.
 
@@ -26,6 +26,7 @@ nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Ap
 - Telegram off until you set a token and an allowlist
 - Shell tool off, workspace restriction on
 - `id42-work` on `PATH`. The MCP server is off until `ID42_WORK_ENABLED=true`, then it is a stdio child of the gateway. No extra published port. The default factory stores executions in SQLite and registers `echo`, `note`, and `note.list`
+- `scripts/work-approve.sh` runs `id42-work approvals` for that factory. `approve` resumes the execution as the host actor
 - `nanobot-cli` under the `cli` profile (`status`, and any other nanobot command)
 - Optional `ollama` service under the `ollama` profile
 
