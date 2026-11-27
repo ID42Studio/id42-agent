@@ -452,6 +452,195 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
 grep -q "persist-ok" "$WORKDIR/persist-check.out"
 echo "OK id42-work executions are still listed after a gateway restart"
 
+echo "== id42-work native approvals =="
+gateway_run() {
+  ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+    "$@"
+}
+
+probe_cmd() {
+  gateway_run --entrypoint /app/.venv/bin/python nanobot-gateway - "$@" <"$ROOT/scripts/lib/mcp_probe.py"
+}
+
+approvals_cmd() {
+  gateway_run --entrypoint /usr/local/bin/id42-work -e "PYTHONPATH=/opt/id42-agent" \
+    nanobot-gateway approvals "$@"
+}
+
+approval_id_for() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+path, exec_id = sys.argv[1], sys.argv[2]
+for raw in open(path, encoding="utf-8"):
+    line = raw.strip()
+    if not line.startswith("pending "):
+        continue
+    fields = {}
+    for part in line.split()[1:]:
+        key, sep, value = part.partition("=")
+        if sep:
+            fields[key] = value
+    if fields.get("execution_id") == exec_id and fields.get("approval_id"):
+        print(fields["approval_id"])
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+require_pending_line() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+path, exec_id = sys.argv[1], sys.argv[2]
+required = (
+    "gate=ACTION",
+    "reviewer_capability=approve:note",
+    "actor_id=id42-agent",
+    "execution_status=WAITING_APPROVAL",
+    "work_id=note",
+)
+for raw in open(path, encoding="utf-8"):
+    line = raw.strip()
+    if f"execution_id={exec_id}" not in line.split():
+        continue
+    missing = [item for item in required if item not in line.split()]
+    if missing:
+        raise SystemExit("pending line missing " + ",".join(missing))
+    raise SystemExit(0)
+raise SystemExit("pending line for the execution is missing")
+PY
+}
+
+probe_cmd start-note "smoke-approve-note" "smoke-approve" | tee "$WORKDIR/approve-start.out"
+sed -i 's/\r$//' "$WORKDIR/approve-start.out"
+approve_exec=$(awk -F= '/^execution_id=/{print $2}' "$WORKDIR/approve-start.out")
+approve_status=$(awk -F= '/^status=/{print $2}' "$WORKDIR/approve-start.out")
+[[ -n "$approve_exec" && "$approve_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "approve-path note did not wait for approval"
+
+approvals_cmd list --factory id42_agent.mcp_host:server | tee "$WORKDIR/approve-list.out"
+sed -i 's/\r$//' "$WORKDIR/approve-list.out"
+approve_approval=$(approval_id_for "$WORKDIR/approve-list.out" "$approve_exec") \
+  || id42_die "approvals list did not include the waiting note"
+require_pending_line "$WORKDIR/approve-list.out" "$approve_exec"
+
+approvals_cmd approve "$approve_approval" \
+  --factory id42_agent.mcp_host:server \
+  --actor id42-operator \
+  --reason "smoke" \
+  --resume | tee "$WORKDIR/approve-decision.out"
+sed -i 's/\r$//' "$WORKDIR/approve-decision.out"
+grep -q "approved approval_id=${approve_approval} " "$WORKDIR/approve-decision.out" \
+  || id42_die "approve did not report the approval id"
+grep -q "execution_status=COMPLETED" "$WORKDIR/approve-decision.out" \
+  || id42_die "approve --resume did not report COMPLETED"
+grep -q "resumed=true" "$WORKDIR/approve-decision.out" \
+  || id42_die "approve --resume did not report resumed=true"
+grep -q "decision_actor_id=id42-operator" "$WORKDIR/approve-decision.out" \
+  || id42_die "approve did not record id42-operator"
+
+probe_cmd execution-status "$approve_exec" | tee "$WORKDIR/approve-status.out"
+sed -i 's/\r$//' "$WORKDIR/approve-status.out"
+grep -qx "status=COMPLETED" "$WORKDIR/approve-status.out" \
+  || id42_die "approved note is not COMPLETED in the store"
+grep -qx "work_id=note" "$WORKDIR/approve-status.out"
+grep -qx "appended=True" "$WORKDIR/approve-status.out" \
+  || id42_die "approved note did not append"
+
+if approvals_cmd approve "$approve_approval" \
+  --factory id42_agent.mcp_host:server \
+  --actor id42-operator \
+  --reason "again" \
+  --resume >"$WORKDIR/approve-again.out" 2>"$WORKDIR/approve-again.err"
+then
+  id42_die "a second approval decision was accepted"
+fi
+grep -q "id42-work:" "$WORKDIR/approve-again.err" \
+  || {
+    cat "$WORKDIR/approve-again.err" >&2 || true
+    id42_die "a second approval decision failed without an id42-work error"
+  }
+
+probe_cmd execution-status "$approve_exec" | tee "$WORKDIR/approve-status-again.out"
+sed -i 's/\r$//' "$WORKDIR/approve-status-again.out"
+grep -qx "status=COMPLETED" "$WORKDIR/approve-status-again.out" \
+  || id42_die "a refused second decision changed the completed note"
+
+probe_cmd start-note "smoke-reject-note" "smoke-reject" | tee "$WORKDIR/reject-start.out"
+sed -i 's/\r$//' "$WORKDIR/reject-start.out"
+reject_exec=$(awk -F= '/^execution_id=/{print $2}' "$WORKDIR/reject-start.out")
+reject_status=$(awk -F= '/^status=/{print $2}' "$WORKDIR/reject-start.out")
+[[ -n "$reject_exec" && "$reject_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "reject-path note did not wait for approval"
+
+approvals_cmd list --factory id42_agent.mcp_host:server | tee "$WORKDIR/reject-list.out"
+sed -i 's/\r$//' "$WORKDIR/reject-list.out"
+reject_approval=$(approval_id_for "$WORKDIR/reject-list.out" "$reject_exec") \
+  || id42_die "approvals list did not include the note to reject"
+if grep -q "execution_id=${approve_exec}" "$WORKDIR/reject-list.out"; then
+  id42_die "completed note is still listed as pending"
+fi
+
+approvals_cmd reject "$reject_approval" \
+  --factory id42_agent.mcp_host:server \
+  --actor id42-operator \
+  --reason "no" | tee "$WORKDIR/reject-decision.out"
+sed -i 's/\r$//' "$WORKDIR/reject-decision.out"
+grep -q "rejected approval_id=${reject_approval} " "$WORKDIR/reject-decision.out" \
+  || id42_die "reject did not report the approval id"
+grep -q "execution_status=REJECTED" "$WORKDIR/reject-decision.out" \
+  || id42_die "reject did not report REJECTED"
+grep -q "resumed=false" "$WORKDIR/reject-decision.out" \
+  || id42_die "reject reported a resume"
+
+probe_cmd execution-status "$reject_exec" | tee "$WORKDIR/reject-status.out"
+sed -i 's/\r$//' "$WORKDIR/reject-status.out"
+grep -qx "status=REJECTED" "$WORKDIR/reject-status.out" \
+  || id42_die "rejected note is not REJECTED in the store"
+grep -qx "work_id=note" "$WORKDIR/reject-status.out"
+if grep -qx "appended=True" "$WORKDIR/reject-status.out"; then
+  id42_die "rejected note appended"
+fi
+
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-approve.sh" list | tee "$WORKDIR/wrapper-list.out"
+sed -i 's/\r$//' "$WORKDIR/wrapper-list.out"
+grep -q "execution_id=${note_id}" "$WORKDIR/wrapper-list.out" \
+  || id42_die "work-approve.sh list did not show the note that is still waiting"
+if grep -q "execution_id=${approve_exec}" "$WORKDIR/wrapper-list.out"; then
+  id42_die "work-approve.sh list showed the completed note"
+fi
+if grep -q "execution_id=${reject_exec}" "$WORKDIR/wrapper-list.out"; then
+  id42_die "work-approve.sh list showed the rejected note"
+fi
+
+probe_cmd start-note "smoke-wrapper-note" "smoke-wrapper" | tee "$WORKDIR/wrapper-start.out"
+sed -i 's/\r$//' "$WORKDIR/wrapper-start.out"
+wrapper_exec=$(awk -F= '/^execution_id=/{print $2}' "$WORKDIR/wrapper-start.out")
+wrapper_status=$(awk -F= '/^status=/{print $2}' "$WORKDIR/wrapper-start.out")
+[[ -n "$wrapper_exec" && "$wrapper_status" == "WAITING_APPROVAL" ]] \
+  || id42_die "wrapper approve note did not wait for approval"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-approve.sh" list | tee "$WORKDIR/wrapper-list-2.out"
+sed -i 's/\r$//' "$WORKDIR/wrapper-list-2.out"
+wrapper_approval=$(approval_id_for "$WORKDIR/wrapper-list-2.out" "$wrapper_exec") \
+  || id42_die "work-approve.sh list did not include the wrapper note"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/work-approve.sh" approve "$wrapper_approval" --reason "wrapper" \
+  | tee "$WORKDIR/wrapper-approve.out"
+sed -i 's/\r$//' "$WORKDIR/wrapper-approve.out"
+grep -q "execution_status=COMPLETED" "$WORKDIR/wrapper-approve.out" \
+  || id42_die "work-approve.sh approve did not resume to COMPLETED"
+grep -q "resumed=true" "$WORKDIR/wrapper-approve.out" \
+  || id42_die "work-approve.sh approve did not pass --resume"
+probe_cmd execution-status "$wrapper_exec" | tee "$WORKDIR/wrapper-status.out"
+sed -i 's/\r$//' "$WORKDIR/wrapper-status.out"
+grep -qx "status=COMPLETED" "$WORKDIR/wrapper-status.out" \
+  || id42_die "wrapper-approved note is not COMPLETED in the store"
+echo "OK id42-work approvals list, approve --resume, and reject"
+
 echo "== doctor security baseline on the running gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
@@ -478,6 +667,14 @@ fi
 if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the default works"
+fi
+if ! grep -q "OK: id42-work pin is 720013036c9547040118528fdb1d187bdb6f6afb" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work pin"
+fi
+if ! grep -q "OK: id42-work approvals command is available" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work approvals command"
 fi
 echo "OK doctor accepts the running gateway baseline"
 

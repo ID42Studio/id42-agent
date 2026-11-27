@@ -10,6 +10,8 @@ Commands:
   factory must advertise echo, note, and note.list.
 - ``persist-start`` runs echo and note, then prints their execution ids.
 - ``persist-check ECHO_ID NOTE_ID`` lists executions and requires those ids.
+- ``start-note TEXT KEY`` starts one note and prints its id and status.
+- ``execution-status EXECUTION_ID`` prints the stored status of one execution.
 """
 
 from __future__ import annotations
@@ -308,6 +310,59 @@ def persist_start() -> None:
     print("note_status=WAITING_APPROVAL")
 
 
+def start_note(text: str, key: str) -> None:
+    session = _Session()
+    note_id = ""
+    status = ""
+    try:
+        session.initialize()
+        note = session.tool(
+            "start_execution",
+            {
+                "work_id": "note",
+                "version": "1.0.0",
+                "input_data": {"text": text},
+                "idempotency_key": key,
+            },
+        )
+        note_id = str(note.get("execution_id") or "")
+        status = str(note.get("status") or "")
+        if not note_id or not status:
+            session.fail("start_execution returned no execution id or status")
+    except (TimeoutError, OSError, BrokenPipeError) as exc:
+        session.fail(str(exc))
+    finally:
+        session.close()
+    print(f"execution_id={note_id}")
+    print(f"status={status}")
+
+
+def execution_status(execution_id: str) -> None:
+    session = _Session()
+    status = ""
+    work_id = ""
+    appended = ""
+    try:
+        session.initialize()
+        payload = session.tool("get_execution", {"execution_id": execution_id})
+        status = str(payload.get("status") or "")
+        work_id = str(payload.get("work_id") or "")
+        outcome = payload.get("outcome")
+        output = outcome.get("output") if isinstance(outcome, dict) else None
+        if isinstance(output, dict) and "appended" in output:
+            appended = str(output.get("appended"))
+        if not status or not work_id:
+            session.fail("get_execution returned no status")
+    except (TimeoutError, OSError, BrokenPipeError) as exc:
+        session.fail(str(exc))
+    finally:
+        session.close()
+    print(f"status={status}")
+    print(f"work_id={work_id}")
+    if appended:
+        print(f"appended={appended}")
+
+
 def persist_check(echo_id: str, note_id: str) -> None:
     session = _Session()
     try:
@@ -345,6 +400,14 @@ def main() -> None:
         if len(sys.argv) != 4:
             _fail("usage: mcp_probe.py persist-check ECHO_ID NOTE_ID", b"")
         persist_check(sys.argv[2], sys.argv[3])
+    elif command == "start-note":
+        if len(sys.argv) != 4:
+            _fail("usage: mcp_probe.py start-note TEXT KEY", b"")
+        start_note(sys.argv[2], sys.argv[3])
+    elif command == "execution-status":
+        if len(sys.argv) != 3:
+            _fail("usage: mcp_probe.py execution-status EXECUTION_ID", b"")
+        execution_status(sys.argv[2])
     else:
         _fail(f"unknown command {command}", b"")
 
