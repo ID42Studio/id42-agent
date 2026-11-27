@@ -86,58 +86,9 @@ if [[ -z "$container_id" ]]; then
   bad "nanobot-gateway is not running (start it with make up)"
 else
   good "nanobot-gateway container is present"
-  # The Python checker exits 0 only when the baseline holds. A missing "!"
+  # baseline.py exits 0 only when the baseline holds. A missing "!"
   # would report FAIL for a compliant container and hide a real violation.
-  if ! python3 - "$container_id" <<'PY'
-import json, subprocess, sys
-container = sys.argv[1]
-raw = subprocess.check_output(["docker", "inspect", container], text=True)
-info = json.loads(raw)[0]
-host = info["HostConfig"]
-bindings = host.get("PortBindings") or {}
-errors = []
-for port in ("8765/tcp", "18790/tcp"):
-    items = bindings.get(port) or []
-    if not items:
-        errors.append(f"{port} is not published")
-        continue
-    for item in items:
-        ip = item.get("HostIp") or ""
-        if ip not in {"127.0.0.1", "::1"}:
-            errors.append(f"{port} is published on {ip or 'all interfaces'}")
-mounts = info.get("Mounts") or []
-for mount in mounts:
-    source = mount.get("Source") or ""
-    destination = mount.get("Destination") or ""
-    blob = f"{source} {destination}"
-    if "docker.sock" in blob:
-        errors.append("docker socket is mounted")
-    if destination in {"/home", "/root", "/home/nanobot"} or source.startswith("/home/"):
-        errors.append(f"home directory is mounted ({source} -> {destination})")
-def _caps(items):
-    names = set()
-    for item in items or []:
-        name = str(item).upper()
-        if name.startswith("CAP_"):
-            name = name[4:]
-        names.add(name)
-    return names
-
-added = _caps(host.get("CapAdd"))
-dropped = _caps(host.get("CapDrop"))
-if "ALL" not in dropped:
-    errors.append(f"cap_drop is {sorted(dropped)}")
-extra = added - {"CHOWN", "SETGID", "SETUID"}
-if extra:
-    errors.append(f"unexpected capabilities: {sorted(extra)}")
-security = " ".join(host.get("SecurityOpt") or [])
-if "no-new-privileges" not in security:
-    errors.append("no-new-privileges is not set")
-if errors:
-    print("\n".join(errors), file=sys.stderr)
-    sys.exit(1)
-PY
-  then
+  if ! python3 "$ROOT/scripts/lib/baseline.py" "$container_id"; then
     bad "running container does not match the security baseline"
   else
     good "running container binds loopback ports, drops capabilities, and has no docker socket or home mount"

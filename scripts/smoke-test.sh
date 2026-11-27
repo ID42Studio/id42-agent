@@ -26,6 +26,74 @@ trap cleanup EXIT
 id42_require_cmd python3 docker
 docker info >/dev/null 2>&1 || id42_die "docker daemon is not reachable"
 
+echo "== security baseline rules =="
+python3 - "$ROOT/scripts/lib/baseline.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("baseline", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+cases = [
+    ("/home/runner/work/id42-agent/id42-agent/docker/entrypoint.sh", "/id42/entrypoint.sh", False),
+    ("/home/marcel/src/id42-agent/docker/entrypoint.sh", "/id42/entrypoint.sh", False),
+    ("/workspace/docker/entrypoint.sh", "/id42/entrypoint.sh", False),
+    ("/home/marcel/.nanobot", "/home/nanobot/.nanobot", True),
+    ("/home/marcel", "/home/nanobot", True),
+    ("/root/.ssh", "/tmp/ssh", True),
+    ("/var/run/docker.sock", "/var/run/docker.sock", True),
+    ("/var/lib/docker/volumes/nanobot-data/_data", "/home/nanobot/.nanobot", False),
+]
+failed = False
+for source, dest, expect in cases:
+    got = bool(mod.mount_errors(source, dest))
+    if got != expect:
+        print(
+            f"baseline mismatch {source} -> {dest}: flagged={got} expected={expect}",
+            file=sys.stderr,
+        )
+        failed = True
+
+compliant = {
+    "HostConfig": {
+        "PortBindings": {
+            "8765/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8765"}],
+            "18790/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18790"}],
+        },
+        "CapAdd": ["CAP_CHOWN", "CAP_SETGID", "CAP_SETUID"],
+        "CapDrop": ["CAP_ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+    },
+    "Mounts": [
+        {
+            "Source": "/var/lib/docker/volumes/nanobot-data/_data",
+            "Destination": "/home/nanobot/.nanobot",
+        },
+        {
+            "Source": "/home/runner/work/id42-agent/id42-agent/docker/entrypoint.sh",
+            "Destination": "/id42/entrypoint.sh",
+        },
+    ],
+}
+if mod.security_errors(compliant):
+    print("compliant container was rejected:", mod.security_errors(compliant), file=sys.stderr)
+    failed = True
+violating = {
+    "HostConfig": dict(compliant["HostConfig"]),
+    "Mounts": list(compliant["Mounts"]),
+}
+violating["HostConfig"]["PortBindings"] = {
+    "8765/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8765"}],
+    "18790/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18790"}],
+}
+if not mod.security_errors(violating):
+    print("violating container was accepted", file=sys.stderr)
+    failed = True
+raise SystemExit(1 if failed else 0)
+PY
+echo "OK baseline accepts a checkout under /home and rejects a real home mount"
+
 echo "== host config checks =="
 
 expect_fail() {
@@ -169,42 +237,15 @@ container=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" ps -q nanobot-gateway)
 [[ -n "$container" ]] || id42_die "gateway container id is empty"
 
-python3 - "$container" <<'PY'
-import json, subprocess, sys
+python3 - "$container" "$ROOT/scripts/lib/baseline.py" <<'PY'
+import importlib.util, json, subprocess, sys
+spec = importlib.util.spec_from_file_location("baseline", sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
 info = json.loads(subprocess.check_output(["docker", "inspect", sys.argv[1]], text=True))[0]
-bindings = info["HostConfig"].get("PortBindings") or {}
-for port in ("8765/tcp", "18790/tcp"):
-    items = bindings.get(port) or []
-    if not items:
-        raise SystemExit(f"missing binding for {port}")
-    for item in items:
-        ip = item.get("HostIp") or ""
-        if ip not in {"127.0.0.1", "::1"}:
-            raise SystemExit(f"{port} bound to {ip or 'all interfaces'}")
-mounts = info.get("Mounts") or []
-for mount in mounts:
-    blob = f"{mount.get('Source', '')} {mount.get('Destination', '')}"
-    if "docker.sock" in blob:
-        raise SystemExit("docker socket is mounted")
-def _caps(items: list[str]) -> set[str]:
-    names = set()
-    for item in items:
-        name = item.upper()
-        if name.startswith("CAP_"):
-            name = name[4:]
-        names.add(name)
-    return names
-
-added = _caps(info["HostConfig"].get("CapAdd") or [])
-dropped = _caps(info["HostConfig"].get("CapDrop") or [])
-if "ALL" not in dropped:
-    raise SystemExit(f"cap drop is {sorted(dropped)}")
-extra = added - {"CHOWN", "SETGID", "SETUID"}
-if extra:
-    raise SystemExit(f"unexpected caps {sorted(extra)}")
-security = " ".join(info["HostConfig"].get("SecurityOpt") or [])
-if "no-new-privileges" not in security:
-    raise SystemExit("no-new-privileges missing")
+errors = mod.security_errors(info)
+if errors:
+    raise SystemExit("\n".join(errors))
 memory = info["HostConfig"].get("Memory") or 0
 nano = info["HostConfig"].get("NanoCpus") or 0
 if memory <= 0 or nano <= 0:
@@ -238,9 +279,11 @@ echo "== doctor security baseline on the running gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
 if grep -q "FAIL: running container does not match the security baseline" "$WORKDIR/doctor.err"; then
+  cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor reported a security-baseline failure for a compliant gateway"
 fi
 if ! grep -q "OK: running container binds loopback ports" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the security baseline"
 fi
 echo "OK doctor accepts the running gateway baseline"
