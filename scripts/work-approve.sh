@@ -59,7 +59,9 @@ id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --user
   --entrypoint /bin/sh nanobot-gateway \
   -c 'chmod 700 /var/lib/id42-work 2>/dev/null || true; chown nanobot:nanobot /var/lib/id42-work'
 
-exec id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+# exec cannot run a shell function. id42_compose is one, so the compose
+# invocation is written out here and replaces this process.
+exec docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /usr/local/bin/id42-work \
   -e "PYTHONPATH=/opt/id42-agent" \
   nanobot-gateway "$@"
