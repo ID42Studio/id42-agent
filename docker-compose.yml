@@ -18,7 +18,7 @@ x-nanobot: &nanobot
       upstream: service:nanobot-upstream
     args:
       # Full commit. A branch name is not a pin. Keep in sync with Dockerfile.
-      ID42_WORK_REF: ${ID42_WORK_REF:-720013036c9547040118528fdb1d187bdb6f6afb}
+      ID42_WORK_REF: ${ID42_WORK_REF:-4dc4cef40affc3baaa563f59564b143827f8f3d7}
   environment:
     TZ: ${TZ:-America/Sao_Paulo}
     NANOBOT_DOCKER_BOOTSTRAP: "1"

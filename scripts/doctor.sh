@@ -183,7 +183,7 @@ rm -f "$probe_out"
 
 if [[ -n "$container_id" ]]; then
   # Keep in sync with the Dockerfile default for ID42_WORK_REF.
-  expected_pin=720013036c9547040118528fdb1d187bdb6f6afb
+  expected_pin=4dc4cef40affc3baaa563f59564b143827f8f3d7
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
   pin=${pin//$'\r'/}
   pin=${pin//$'\n'/}
@@ -204,6 +204,22 @@ if [[ -n "$container_id" ]]; then
     good "id42-work approvals command is available"
   else
     bad "id42-work approvals command is missing or has no --factory, --actor, --reason, or --resume"
+    if [[ -s "$help_out" ]]; then
+      tail -n 20 "$help_out" >&2 || true
+    fi
+  fi
+  rm -f "$help_out"
+
+  help_out=$(mktemp)
+  if "${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway \
+    /usr/local/bin/id42-work reconcile abandon --help >"$help_out" 2>&1 \
+    && grep -q -- '--factory' "$help_out" \
+    && grep -q -- '--actor' "$help_out" \
+    && grep -q -- '--reason' "$help_out"
+  then
+    good "id42-work reconcile command is available"
+  else
+    bad "id42-work reconcile command is missing or has no --factory, --actor, or --reason"
     if [[ -s "$help_out" ]]; then
       tail -n 20 "$help_out" >&2 || true
     fi

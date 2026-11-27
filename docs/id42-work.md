@@ -2,16 +2,16 @@
 
 The gateway can start [id42-work](https://github.com/ID42Studio/id42-work) as an MCP server. The server is a child process of the gateway. It speaks stdio. It does not open a port.
 
-The package is `id42-work[mcp]` at commit `720013036c9547040118528fdb1d187bdb6f6afb`. PyPI publishing is not used. The image installs it from git:
+The package is `id42-work[mcp]` at commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`. PyPI publishing is not used. The image installs it from git:
 
 ```text
-id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@720013036c9547040118528fdb1d187bdb6f6afb
+id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@4dc4cef40affc3baaa563f59564b143827f8f3d7
 ```
 
 `make build` passes that commit as the build arg `ID42_WORK_REF`. Set the same name in the environment to build a different commit, then rebuild. Use a full commit SHA. A branch name moves.
 
 ```bash
-ID42_WORK_REF=720013036c9547040118528fdb1d187bdb6f6afb make build
+ID42_WORK_REF=4dc4cef40affc3baaa563f59564b143827f8f3d7 make build
 ```
 
 ## Why the virtualenv is separate
@@ -51,9 +51,9 @@ A later change to `ID42_WORK_ENABLED` in `.env` does not rewrite an existing `co
 | `note.list` | `1.0.0` | Returns the most recent notes already stored. Calls read-only `notes.read`. | `AUTONOMOUS`. No approval. |
 | `note` | `1.0.0` | Appends one note. Calls side-effecting `notes.append`. | `SUPERVISED`. The action waits for approval. Pass an `idempotency_key`. |
 
-The actor id is `id42-agent`, tenant `local`. That actor holds `notes.read` and `notes.append`. It does not hold `approve:note`. A supervised side effect therefore returns `WAITING_APPROVAL`. `resume_execution` does not decide.
+The actor id is `id42-agent`, tenant `local`. That actor holds `notes.read` and `notes.append`. It does not hold `approve:note` or `reconcile:note`. A supervised side effect therefore returns `WAITING_APPROVAL`. `resume_execution` does not decide an approval, and it does not let the client mark a call applied.
 
-Notes are one JSON object per line in `/var/lib/id42-work/notes.jsonl`, next to the database. The file stops accepting new notes at 1 MiB. Each note is 1 to 2000 non-blank characters. `note.list` takes `limit` from 1 to 50 and defaults to 20. `echo` accepts up to 4000 characters.
+Notes are one JSON object per line in `/var/lib/id42-work/notes.jsonl`, next to the database. Each new line stores `operation_id`, the capability call's idempotency key, with `text` and `byte_count`. A line that only has `text` is still listed. It cannot prove a later append. The file stops accepting new notes at 1 MiB. Each note is 1 to 2000 non-blank characters. `note.list` takes `limit` from 1 to 50 and defaults to 20. `echo` accepts up to 4000 characters.
 
 `id42_agent.mcp_stub:server` is the empty factory from the previous image. It uses `MemoryStorage` and registers no works. Set `ID42_WORK_FACTORY=id42_agent.mcp_stub:server` before the first init to keep that behavior. State from that factory disappears when the server process exits.
 
@@ -99,13 +99,56 @@ The command is not an MCP tool. The model cannot invoke it while the shell tool 
 
 Actor seals are not stored. id42-work keeps the sealing key in process memory and generates a new one on every process. Executions record `actor_id` and `tenant_id`, so a later process that issues those same ids can resume, and a later process can seal `id42-operator` again.
 
+## Reconciliation
+
+`notes.append` can be left `UNCERTAIN` when the process dies after the journal records the call and before the result is stored. The note file is the proof. `NoteStore.reconcile` reads it and does not append:
+
+| File | Verdict |
+|---|---|
+| Readable, and the `operation_id` is on a line | `APPLIED`, with `{"appended": true, "byte_count": N}` from that line |
+| Readable, and the id is absent, including a missing file | `NOT_APPLIED` |
+| Unreadable, or a line is not a note | `UNKNOWN` |
+
+`resume` of a `FAILED` execution that still requires reconciliation calls that probe. `APPLIED` is replayed, so the note is not written again, and the execution can reach `COMPLETED`. `NOT_APPLIED` retries the same operation id. The previous ACTION approval was consumed, so the retry waits for approval again. One approval then writes one line. `UNKNOWN` leaves the call open.
+
+A crash while the execution is `VALIDATING` marks an `IN_FLIGHT` capability call `UNCERTAIN` without probing. The following resume of that `VALIDATION_FAILED` execution probes. A crash while the execution is still `RUNNING` probes on the first resume, before the call is stored as `UNCERTAIN`, when the provider defines `reconcile`.
+
+When the file cannot prove the call, a person decides. The MCP server has no reconcile tool. The command is `id42-work reconcile`. It loads the same factory. It seals `--actor` in the execution's tenant with only `reconcile:<work_id>`. For `note` that grant is `reconcile:note`. The operator id is `id42-operator`, the same id as approvals, and a different id from `id42-agent`. The execution actor cannot reconcile its own call. `applied` and `not-applied` take `--resume` when the host actor should continue. `abandon` does not resume. It leaves the execution `FAILED` with reason `reconciliation_abandoned`.
+
+```bash
+id42-work reconcile list --factory id42_agent.mcp_host:server
+id42-work reconcile show EXECUTION_ID ACTION_ID --factory id42_agent.mcp_host:server
+id42-work reconcile applied EXECUTION_ID ACTION_ID \
+  --factory id42_agent.mcp_host:server --actor id42-operator \
+  --reason "the line is in the file" --result '{"appended": true, "byte_count": 4}' --resume
+id42-work reconcile not-applied EXECUTION_ID ACTION_ID \
+  --factory id42_agent.mcp_host:server --actor id42-operator \
+  --reason "nothing was written" --resume
+id42-work reconcile abandon EXECUTION_ID ACTION_ID \
+  --factory id42_agent.mcp_host:server --actor id42-operator \
+  --reason "cannot be known"
+```
+
+`list` prints calls that are still `UNCERTAIN`. `show` prints one JSON object. The result is only a `result_digest`.
+
+`scripts/work-reconcile.sh` runs that command inside the gateway as uid 1000, with `PYTHONPATH=/opt/id42-agent`. It always passes `--factory id42_agent.mcp_host:server`. A decision also passes `--actor id42-operator`. `--resume` is passed through only when the caller sets it. `abandon` has no resume.
+
+```bash
+./scripts/work-reconcile.sh list
+./scripts/work-reconcile.sh show EXECUTION_ID ACTION_ID
+./scripts/work-reconcile.sh applied EXECUTION_ID ACTION_ID --reason "the line is in the file" --result '{"appended": true, "byte_count": 4}' --resume
+./scripts/work-reconcile.sh not-applied EXECUTION_ID ACTION_ID --reason "nothing was written" --resume
+./scripts/work-reconcile.sh abandon EXECUTION_ID ACTION_ID --reason "cannot be known"
+```
+
+The action id for `note` is `append-note`. The command is not an MCP tool.
+
 ## Gaps in id42-work
 
-Left as they are at commit `720013036c9547040118528fdb1d187bdb6f6afb`:
+Left as they are at commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`:
 
-- No approve or reject tool on the MCP server. The CLI above is the decision path. This repository does not add a WebUI for it.
+- No approve, reject, or reconcile tool on the MCP server. The CLIs above are the decision path. This repository does not add a WebUI for them.
 - `ActorAuthority` keys stay in memory. There is no durable seal to reload.
-- An `IN_FLIGHT` capability call becomes `UNCERTAIN` after a crash. There is no reconciliation tool. The note provider does not retry a write it cannot prove.
 - `PostgresStorage` needs the `postgres` extra. This image does not install it.
 
 ## Your factory
@@ -152,6 +195,6 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 ## Checks
 
-`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `720013036c9547040118528fdb1d187bdb6f6afb`. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
+`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `4dc4cef40affc3baaa563f59564b143827f8f3d7`. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
-The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself.
+The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again.
