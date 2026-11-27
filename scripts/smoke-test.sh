@@ -233,4 +233,27 @@ if [[ "$healthy" != "1" ]]; then
   id42_die "compose healthcheck did not report healthy (last status: ${status:-unknown})"
 fi
 echo "OK compose healthcheck is healthy"
+
+echo "== doctor security baseline on the running gateway =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
+if grep -q "FAIL: running container does not match the security baseline" "$WORKDIR/doctor.err"; then
+  id42_die "doctor reported a security-baseline failure for a compliant gateway"
+fi
+if ! grep -q "OK: running container binds loopback ports" "$WORKDIR/doctor.out"; then
+  id42_die "doctor did not confirm the security baseline"
+fi
+echo "OK doctor accepts the running gateway baseline"
+
+echo "== bootstrap again after private data dirs exist =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" exec -T -u 1000 nanobot-gateway \
+  /bin/sh -c 'mkdir -p /home/nanobot/.nanobot/sessions /home/nanobot/.nanobot/updates && chmod 700 /home/nanobot/.nanobot/sessions /home/nanobot/.nanobot/updates'
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  "$ROOT/scripts/bootstrap.sh" >"$WORKDIR/bootstrap3.log"
+if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/bootstrap3.log"; then
+  id42_die "bootstrap printed the web token on re-run"
+fi
+grep -q "leaving WebUI edits unchanged" "$WORKDIR/bootstrap3.log"
+echo "OK bootstrap is idempotent after mode-700 data directories exist"
 echo "smoke test passed"

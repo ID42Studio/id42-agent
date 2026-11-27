@@ -33,13 +33,15 @@ echo "Building the pinned nanobot image (first build fetches upstream and can ta
 id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" build nanobot-gateway
 
 # The image creates /home/nanobot/.nanobot as uid 1000. With cap_drop ALL, root
-# cannot write that directory (no CAP_DAC_OVERRIDE). chown uses CAP_CHOWN, which
-# the upstream entrypoint also needs, then the nanobot user writes the files.
+# cannot write that directory (no CAP_DAC_OVERRIDE). chown of the mount point
+# uses CAP_CHOWN, which the upstream entrypoint also needs, then uid 1000 writes
+# the files. Do not recurse: after the gateway runs, sessions/ and updates/ are
+# mode 700 and owned by uid 1000, and root cannot traverse them.
 state=$(
   id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --user 0 \
     --entrypoint /bin/sh nanobot-gateway \
     -c 'set -eu
-chown -R nanobot:nanobot /home/nanobot/.nanobot
+chown nanobot:nanobot /home/nanobot/.nanobot
 if [ -f /home/nanobot/.nanobot/config.json ]; then echo id42-state=present; else echo id42-state=missing; fi' \
     | sed -n 's/^id42-state=//p' \
     | tail -n 1

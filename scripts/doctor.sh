@@ -86,7 +86,9 @@ if [[ -z "$container_id" ]]; then
   bad "nanobot-gateway is not running (start it with make up)"
 else
   good "nanobot-gateway container is present"
-  if python3 - "$container_id" <<'PY'
+  # The Python checker exits 0 only when the baseline holds. A missing "!"
+  # would report FAIL for a compliant container and hide a real violation.
+  if ! python3 - "$container_id" <<'PY'
 import json, subprocess, sys
 container = sys.argv[1]
 raw = subprocess.check_output(["docker", "inspect", container], text=True)

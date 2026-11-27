@@ -79,7 +79,7 @@ curl --fail http://127.0.0.1:18790/health
 Interactive nanobot commands:
 
 ```bash
-docker compose --profile cli run --rm nanobot-cli agent -m "Hello"
+docker compose --profile cli run --rm -T nanobot-cli agent -m "Hello"
 ```
 
 Changing `OLLAMA_MODEL`, the Ollama URL, or the Telegram token in `.env` after the first successful init does nothing to `config.json`. Change those in the WebUI, or edit the file in the volume, then restart the gateway. Delete `config.json` inside the volume only when you intend to render again. That discards WebUI edits to that file.
