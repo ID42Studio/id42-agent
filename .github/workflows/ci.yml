@@ -17,7 +17,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: shellcheck
         run: |
-          shellcheck -x -s bash scripts/bootstrap.sh scripts/doctor.sh scripts/smoke-test.sh scripts/lib/common.sh
+          shellcheck -x -s bash scripts/bootstrap.sh scripts/doctor.sh scripts/smoke-test.sh scripts/work-approve.sh scripts/lib/common.sh
           shellcheck -s sh docker/entrypoint.sh docker/seed-volume.sh
 
   compose:

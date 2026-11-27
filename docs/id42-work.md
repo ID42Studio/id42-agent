@@ -43,13 +43,56 @@ A later change to `ID42_WORK_ENABLED` in `.env` does not rewrite an existing `co
 
 ## Default factory
 
-`id42_agent.mcp_host:server` is copied into the image at `/opt/id42-agent` and placed on `PYTHONPATH`. It builds a `WorkMcpServer` with:
+`id42_agent.mcp_host:server` is copied into the image at `/opt/id42-agent` and placed on `PYTHONPATH`. It builds a `WorkMcpServer` with SQLite at `/var/lib/id42-work/work.sqlite` and three works.
 
-- no registered works
-- an actor issued in the process (`actor_id` `id42-agent`)
-- `MemoryStorage`, which disappears when the server process exits
+| Work | Version | What it does | Policy |
+|---|---|---|---|
+| `echo` | `1.0.0` | Returns the input text. No capability is called. | `AUTONOMOUS`. No approval. |
+| `note.list` | `1.0.0` | Returns the most recent notes already stored. Calls read-only `notes.read`. | `AUTONOMOUS`. No approval. |
+| `note` | `1.0.0` | Appends one note. Calls side-effecting `notes.append`. | `SUPERVISED`. The action waits for approval. Pass an `idempotency_key`. |
 
-`list_works` answers with an empty list. `start_execution` cannot run anything until a factory registers a work. This factory is the safe default so the server can start. It is not a policy for a real system.
+The actor id is `id42-agent`, tenant `local`. That actor holds `notes.read` and `notes.append`. It does not hold `approve:note`. A supervised side effect therefore returns `WAITING_APPROVAL`. `resume_execution` does not decide.
+
+Notes are one JSON object per line in `/var/lib/id42-work/notes.jsonl`, next to the database. The file stops accepting new notes at 1 MiB. Each note is 1 to 2000 non-blank characters. `note.list` takes `limit` from 1 to 50 and defaults to 20. `echo` accepts up to 4000 characters.
+
+`id42_agent.mcp_stub:server` is the empty factory from the previous image. It uses `MemoryStorage` and registers no works. Set `ID42_WORK_FACTORY=id42_agent.mcp_stub:server` before the first init to keep that behavior. State from that factory disappears when the server process exits.
+
+## Store
+
+Compose mounts the named volume `id42-work-data` at `/var/lib/id42-work`. The path is outside `/home/nanobot/.nanobot/workspace` and outside any home directory. The image creates the directory mode `0700`, owned by uid 1000. The entrypoint chowns it again on start, because a new named volume can be root-owned until then. Root has `CAP_CHOWN` and no `CAP_DAC_OVERRIDE`, so it changes the owner and does not recurse.
+
+id42-work's `SqliteStorage` is the durable backend with no extra dependency. The schema is created on open. The journal mode is WAL, so `work.sqlite-wal` and `work.sqlite-shm` sit in the same directory and have to stay on the volume. `PostgresStorage` is not installed.
+
+`ID42_WORK_STORE` overrides the SQLite path inside the server process. It has to be absolute and must not resolve under `/home` or `/root`. nanobot does not pass the gateway environment through to the stdio child, apart from `PATH`, `HOME`, and the `env` map in config. Leave the variable unset so the child uses the volume path. Putting the file in the workspace would let file tools read execution inputs.
+
+`docker compose down` keeps the volume. `docker compose down -v` deletes it. A container restart does not.
+
+An existing `config.json` that already names `id42_agent.mcp_host:server` picks up this factory after the image is rebuilt. Init does not rewrite that file. The new volume starts empty.
+
+## Approvals
+
+id42-work's MCP server has no approve or reject tool, and `id42-work` has no approve command. Decisions are host code. This image ships `python -m id42_agent.approve`, run with the id42-work interpreter so it can import the SDK:
+
+```bash
+./scripts/work-approve.sh pending
+./scripts/work-approve.sh approve APPROVAL_ID --reason "checked"
+./scripts/work-approve.sh reject APPROVAL_ID --reason "no"
+```
+
+`approve` grants the decision as actor `id42-operator` (grant `approve:note` only) and then resumes the execution as `id42-agent`, which is the call that performs `notes.append`. The reviewer and the execution actor are different ids, which is what id42-work requires. `reject` ends the execution as `REJECTED`.
+
+The helper is not registered as an MCP tool. The model cannot invoke it while the shell tool is off.
+
+Actor seals are not stored. id42-work keeps the sealing key in process memory and generates a new one on every process. Executions record `actor_id` and `tenant_id`, so a later process that issues those same ids can resume, and `id42-operator` can still approve.
+
+## Gaps in id42-work
+
+Left as they are at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`:
+
+- No approve or reject tool, and no CLI for a decision. The helper above lives in this repository.
+- `ActorAuthority` keys stay in memory. There is no durable seal to reload.
+- An `IN_FLIGHT` capability call becomes `UNCERTAIN` after a crash. There is no reconciliation tool. The note provider does not retry a write it cannot prove.
+- `PostgresStorage` needs the `postgres` extra. This image does not install it.
 
 ## Your factory
 
@@ -95,6 +138,6 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 ## Checks
 
-`make doctor` runs `id42-work mcp serve` against `id42_agent.mcp_host:server` in a one-shot container, sends `initialize` and `tools/list`, and calls `list_works`. It also reads `/opt/id42-agent/ID42_WORK_REF`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
+`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, opens the SQLite file, then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It also reads `/opt/id42-agent/ID42_WORK_REF`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
-The smoke test renders an enabled config, asks nanobot in the image to load it, and runs the same stdio probe.
+The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`.

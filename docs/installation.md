@@ -71,7 +71,7 @@ make doctor
 make status
 ```
 
-`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that `id42-work mcp serve` answers on stdio, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token or the WebUI token.
+`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that the ID42 Work store is writable and mounted, that `id42-work mcp serve` answers on stdio and lists `echo`, `note`, and `note.list`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token or the WebUI token.
 
 ## Stop
 
@@ -81,7 +81,7 @@ make down
 docker compose down
 ```
 
-The named volume remains. To delete config, sessions, and memory as well:
+The named volumes remain. To delete config, sessions, memory, and the ID42 Work store as well:
 
 ```bash
 docker compose down -v

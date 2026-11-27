@@ -113,14 +113,73 @@ PY
   fi
 fi
 
+if "${COMPOSE[@]}" run --rm --no-deps --user 0 --entrypoint /bin/sh nanobot-gateway \
+  -c 'chmod 700 /var/lib/id42-work 2>/dev/null || true; chown nanobot:nanobot /var/lib/id42-work'
+then
+  good "id42-work store directory is owned by the gateway user"
+else
+  bad "could not prepare the id42-work store directory"
+fi
+
+store_out=$(mktemp)
+if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
+  --entrypoint /opt/id42-work/venv/bin/python \
+  nanobot-gateway - <<'PY' | tee "$store_out"
+import os
+from pathlib import Path
+
+store = Path("/var/lib/id42-work")
+if not store.is_dir() or not os.access(store, os.W_OK | os.X_OK):
+    raise SystemExit("id42-work store is not writable")
+# A named volume has a different device from the container root filesystem.
+if store.stat().st_dev == store.parent.stat().st_dev:
+    raise SystemExit("id42-work store is not a separate mount")
+probe = store / ".doctor-write-probe"
+probe.write_text("ok\n", encoding="utf-8")
+if probe.read_text(encoding="utf-8") != "ok\n":
+    raise SystemExit("id42-work store write did not read back")
+probe.unlink()
+from id42_work import SqliteStorage
+
+db = store / "work.sqlite"
+storage = SqliteStorage(db)
+version = storage.schema_version
+storage.close()
+for suffix in ("", "-wal", "-shm"):
+    extra = Path(str(db) + suffix)
+    if extra.exists():
+        os.chmod(extra, 0o600)
+if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+    raise SystemExit(f"id42-work sqlite schema is {version!r}")
+print(f"store-ok schema={version}")
+PY
+then
+  if grep -q '^store-ok ' "$store_out"; then
+    good "id42-work store is writable, mounted, and opens SQLite"
+  else
+    bad "id42-work store check did not report store-ok"
+  fi
+else
+  bad "id42-work store is not writable or not a persistent mount"
+fi
+rm -f "$store_out"
+
+probe_out=$(mktemp)
 if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
-  nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py"
+  nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$probe_out"
 then
+  sed -i 's/\r$//' "$probe_out"
+  if grep -qx 'works=echo,note,note.list' "$probe_out"; then
+    good "id42-work lists echo, note, and note.list"
+  else
+    bad "id42-work did not list echo, note, and note.list"
+  fi
   good "id42-work MCP server answered on stdio"
 else
   bad "id42-work MCP server did not answer on stdio"
 fi
+rm -f "$probe_out"
 
 if [[ -n "$container_id" ]]; then
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)

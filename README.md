@@ -21,10 +21,11 @@ nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Ap
 
 - `nanobot-gateway`: WebUI on `127.0.0.1:8765`, health on `127.0.0.1:18790`
 - Named volume for `/home/nanobot/.nanobot` (config, workspace, sessions, memory)
+- Named volume `id42-work-data` at `/var/lib/id42-work` for the default ID42 Work store (outside the workspace)
 - Ollama via `providers.ollama.apiBase` (default: the host, through `host.docker.internal`)
 - Telegram off until you set a token and an allowlist
 - Shell tool off, workspace restriction on
-- `id42-work` on `PATH`. The MCP server is off until `ID42_WORK_ENABLED=true`, then it is a stdio child of the gateway. No extra published port
+- `id42-work` on `PATH`. The MCP server is off until `ID42_WORK_ENABLED=true`, then it is a stdio child of the gateway. No extra published port. The default factory stores executions in SQLite and registers `echo`, `note`, and `note.list`
 - `nanobot-cli` under the `cli` profile (`status`, and any other nanobot command)
 - Optional `ollama` service under the `ollama` profile
 
@@ -76,7 +77,7 @@ curl --fail http://127.0.0.1:18790/health
 | Doctor | `make doctor` | `./scripts/doctor.sh` |
 | Test | `make test` | `./scripts/smoke-test.sh` |
 
-`make down` keeps the data volume. `docker compose down -v` deletes it.
+`make down` keeps the data volumes. `docker compose down -v` deletes them, including the ID42 Work store.
 
 Interactive nanobot commands:
 

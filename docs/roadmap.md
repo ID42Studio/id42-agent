@@ -19,9 +19,10 @@ Out of this version: backup and restore, a standalone API, and Postgres.
 
 ## v0.2 — governed agent
 
-The agent still decides what it wants to do. ID42 Work governs what is allowed to run. The stdio attachment is in the image. What is still open:
+The agent still decides what it wants to do. ID42 Work governs what is allowed to run. The stdio attachment is in the image. The default factory registers `echo`, `note.list`, and `note`, and stores executions in SQLite on `id42-work-data`. What is still open:
 
-- Works, policies and a durable store supplied by the operator. The image default registers no works and keeps state in process memory
+- Works and policies supplied by the operator, beyond those three. Set `ID42_WORK_FACTORY` to replace the default. `id42_agent.mcp_stub:server` keeps the empty in-memory server
+- A way to approve from the WebUI. Decisions stay in `scripts/work-approve.sh`, because id42-work exposes no approve tool and no approve command
 - The MCP server remains the policy point for tools that have side effects: what may run, against which records, and with which audit trail
 - Keep the loopback deployment working with `ID42_WORK_ENABLED=false`
 

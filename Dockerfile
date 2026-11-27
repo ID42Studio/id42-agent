@@ -24,7 +24,11 @@ RUN set -eu; \
       "id42-work[mcp] @ git+https://github.com/ID42Studio/id42-work.git@${ID42_WORK_REF}"; \
     ln -sfn "$ID42_WORK_VENV/bin/id42-work" /usr/local/bin/id42-work; \
     printf '%s\n' "$ID42_WORK_REF" > /opt/id42-agent/ID42_WORK_REF; \
-    chown -R nanobot:nanobot /opt/id42-work /opt/id42-agent; \
-    PYTHONPATH=/opt/id42-agent "$ID42_WORK_VENV/bin/python" -c 'import id42_agent.mcp_host as host; server = host.server(); assert type(server).__name__ == "WorkMcpServer"'
+    mkdir -p /var/lib/id42-work; \
+    chmod 700 /var/lib/id42-work; \
+    chown -R nanobot:nanobot /opt/id42-work /opt/id42-agent /var/lib/id42-work; \
+    ID42_WORK_STORE=/tmp/id42-work-build.sqlite PYTHONPATH=/opt/id42-agent \
+      "$ID42_WORK_VENV/bin/python" -c 'import asyncio; import id42_agent.mcp_host as host; import id42_agent.mcp_stub as stub; server = host.server(); listed = asyncio.run(server.list_works()); ids = sorted(item["id"] for item in listed["works"]); assert ids == sorted(host.DEFAULT_WORK_IDS), ids; assert type(stub.server()).__name__ == "WorkMcpServer"'; \
+    rm -f /tmp/id42-work-build.sqlite /tmp/id42-work-build.sqlite-wal /tmp/id42-work-build.sqlite-shm
 
 USER root

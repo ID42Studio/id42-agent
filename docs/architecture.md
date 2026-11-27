@@ -15,12 +15,13 @@ flowchart LR
   web --> gateway
   health --> gateway
   gateway --> volume
+  gateway --> workvol[(id42-work-data)]
   gateway -->|"providers.ollama.apiBase"| ollama
   gateway -.->|optional| telegram
   gateway -.->|"stdio child, opt-in"| work["id42-work mcp serve"]
 ```
 
-`nanobot-gateway` is the upstream image at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65`, started with `gateway`. `docker/entrypoint.sh` only checks that `config.json` is already on the volume, then execs upstream `entrypoint.sh`. That script drops to uid 1000 and, because `NANOBOT_DOCKER_BOOTSTRAP=1`, notices the existing file and does not rewrite it (`nanobot/cli/docker_bootstrap.py`).
+`nanobot-gateway` is the upstream image at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65`, started with `gateway`. `docker/entrypoint.sh` chowns the id42-work store when that directory is mounted, refuses to start when `config.json` is missing, then execs upstream `entrypoint.sh`. That script drops to uid 1000 and, because `NANOBOT_DOCKER_BOOTSTRAP=1`, notices the existing file and does not rewrite it (`nanobot/cli/docker_bootstrap.py`).
 
 The image directory `/home/nanobot/.nanobot` is owned by uid 1000. With every capability dropped except `CHOWN`, `SETGID`, and `SETUID`, root cannot write that directory. Bootstrap `chown`s it to `nanobot` (the same `CHOWN` capability the upstream entrypoint uses) and writes `config.json` as uid 1000.
 
@@ -28,7 +29,7 @@ The image directory `/home/nanobot/.nanobot` is owned by uid 1000. With every ca
 
 `ollama` is profile `ollama` and is not started by `make up`.
 
-The data directory inside the container is `/home/nanobot/.nanobot` (`Dockerfile` `mkdir` and `ENV HOME=/home/nanobot`). The workspace path written into config is `/home/nanobot/.nanobot/workspace`.
+The data directory inside the container is `/home/nanobot/.nanobot` (`Dockerfile` `mkdir` and `ENV HOME=/home/nanobot`). The workspace path written into config is `/home/nanobot/.nanobot/workspace`. The ID42 Work SQLite file is `/var/lib/id42-work/work.sqlite` on the named volume `id42-work-data`. That path is outside the workspace.
 
 ## Why the rendered file sets the bind addresses
 
@@ -99,7 +100,7 @@ The seed in this repository is copied only while `config.json` is created, and o
 
 The package is installed from `ID42Studio/id42-work` at `07eaa2a0787c206398b1296091fea1317f1ff27b` into `/opt/id42-work/venv`. That extra requires `mcp>=2.3`. This nanobot pin requires `mcp<2`, so the packages do not share a virtualenv. `/usr/local/bin/id42-work` is a symlink to the console script. `python` on `PATH` remains `/app/.venv/bin/python`.
 
-The default factory `id42_agent.mcp_host:server` lives at `/opt/id42-agent`. Bootstrap always sets `tools.mcpServers.id42-work.env.PYTHONPATH` to that directory, then appends `ID42_WORK_PYTHONPATH` when it is set. nanobot's stdio client keeps `PATH` and `HOME` and does not inherit `PYTHONPATH` (`mcp` 1.26 `get_default_environment`). Without the explicit value, `id42_agent` would not import. A factory you supply is host code: set `ID42_WORK_FACTORY` and, when the module is not in the image, `ID42_WORK_PYTHONPATH`. Do not put that module in the agent workspace. See [id42-work.md](id42-work.md).
+The default factory `id42_agent.mcp_host:server` lives at `/opt/id42-agent`. It opens `SqliteStorage` at `/var/lib/id42-work/work.sqlite` and registers `echo`, `note.list`, and `note`. `note` is supervised: the side-effecting capability waits for an approval the MCP client cannot grant. `id42_agent.mcp_stub:server` is the previous empty in-memory factory. Bootstrap always sets `tools.mcpServers.id42-work.env.PYTHONPATH` to `/opt/id42-agent`, then appends `ID42_WORK_PYTHONPATH` when it is set. nanobot's stdio client keeps `PATH` and `HOME` and does not inherit `PYTHONPATH` (`mcp` 1.26 `get_default_environment`). Without the explicit value, `id42_agent` would not import. A factory you supply is host code: set `ID42_WORK_FACTORY` and, when the module is not in the image, `ID42_WORK_PYTHONPATH`. Do not put that module, or the SQLite file, in the agent workspace. See [id42-work.md](id42-work.md).
 
 `enabledTools` is omitted, so it stays at the upstream default `["*"]` (`schema.py:423`), which registers tools and resources. `toolTimeout` is 120 seconds (`schema.py:422`; the upstream default is 30). A tool call returns when the runner returns, including at `WAITING_APPROVAL`.
 

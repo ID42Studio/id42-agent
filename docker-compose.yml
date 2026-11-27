@@ -25,6 +25,10 @@ x-nanobot: &nanobot
     NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
   volumes:
     - nanobot-data:/home/nanobot/.nanobot
+    # SQLite store for the default id42-work factory. Outside the agent
+    # workspace and outside any home directory. File tools stay inside the
+    # workspace; the shell tool is off.
+    - id42-work-data:/var/lib/id42-work
     - ./docker/entrypoint.sh:/id42/entrypoint.sh:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -119,4 +123,5 @@ services:
 
 volumes:
   nanobot-data:
+  id42-work-data:
   ollama-data:

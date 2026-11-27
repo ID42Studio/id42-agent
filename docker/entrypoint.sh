@@ -5,6 +5,15 @@
 # that file once, from scripts/bootstrap.sh, and does not overwrite it later.
 set -eu
 
+# The id42-work store is a named volume, not the agent workspace. Root can
+# chown it (CAP_CHOWN). chmod only succeeds while root still owns the
+# directory; after the first boot it is already mode 700 and owned by nanobot.
+store=/var/lib/id42-work
+if [ -d "$store" ]; then
+    chmod 700 "$store" 2>/dev/null || true
+    chown nanobot:nanobot "$store"
+fi
+
 dir="${HOME:-/home/nanobot}/.nanobot"
 if [ ! -f "$dir/config.json" ]; then
     echo "id42-agent: $dir/config.json is missing." >&2
