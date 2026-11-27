@@ -28,7 +28,7 @@ Rendered on first boot, and checked by loading the file with nanobot:
 - `tools.exec.enable` = `false`. The shell tool is not registered (`ExecToolConfig.enable`, default `true` upstream; `docs/configuration.md` says `false` removes it).
 - `tools.restrictToWorkspace` = `true` (default `false` in `ToolsConfig`).
 - Telegram, when enabled, has an explicit `allowFrom` and not `*`.
-- No MCP servers. `tools.mcpServers` stays at its empty default until a later phase.
+- ID42 Work, when enabled, is one stdio MCP server. `tools.mcpServers.id42-work` has a `command` and no `url`. The image does not pass `--http`, and Compose does not publish `8766`. The default factory registers no works. See [id42-work.md](id42-work.md).
 
 File tools and web tools keep their upstream defaults, with workspace restriction on for the tools that honor it. Web fetch can still reach the network. Turn web tools off in the WebUI if you do not want that (`tools.web.enable` exists upstream; this phase does not change it).
 
@@ -51,4 +51,4 @@ Cloud model providers are not configured. Adding one sends conversation content 
 
 ## What this does not claim
 
-Loopback binding protects a single-user host. It does not help if the host account is shared, if you later change the port maps to `0.0.0.0`, or if the model is instructed by untrusted text to use tools that are still enabled. There is no Postgres, no separate API service, and no policy sidecar in this phase. ID42 Work's MCP server is the planned place for execution policy (`docs/roadmap.md`).
+Loopback binding protects a single-user host. It does not help if the host account is shared, if you later change the port maps to `0.0.0.0`, or if the model is instructed by untrusted text to use tools that are still enabled. There is no Postgres and no separate API service. The ID42 Work server is a child process of the gateway, not a sidecar on the network. It does not approve work. A person still decides outside the server. The default factory registers nothing, so turning the server on is not by itself a policy.

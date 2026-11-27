@@ -14,6 +14,10 @@ Do not invent nanobot settings. A key may be written into `config.json` only whe
 
 `v0.4.2` has no `doctor` command, no working `serve`, no `NANOBOT_API_KEY`, and no port `8900`. Do not document those as if they were on this pin.
 
+## id42-work
+
+`id42-work[mcp]` is installed into `/opt/id42-work/venv`, not into `/app/.venv`. nanobot v0.4.2 requires `mcp<2`. id42-work requires `mcp>=2.3`. The console script on `PATH` is `/usr/local/bin/id42-work`. Do not install that extra into the nanobot virtualenv. The pin and the build arg `ID42_WORK_REF` are in `Dockerfile` and `docker-compose.yml`.
+
 ## First boot
 
 `scripts/bootstrap.sh` may create `config.json` only when it is missing. It must not overwrite a file the WebUI has edited. If you add a field, existing volumes keep the old file until the operator edits it or deletes it.

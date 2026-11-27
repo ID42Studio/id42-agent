@@ -4,9 +4,15 @@ Upstream: https://github.com/HKUDS/nanobot
 Pinned release: v0.4.2
 Pinned commit: 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
 
-The image is produced from that commit's Dockerfile. The Dockerfile copies
-nanobot's LICENSE and THIRD_PARTY_NOTICES.md into the image. Those files
-stay in every image this repository builds.
+The image is produced from that commit's Dockerfile, then id42-work is
+installed into a separate virtualenv. The Dockerfile copies nanobot's LICENSE
+and THIRD_PARTY_NOTICES.md into the image. Those files stay in every image
+this repository builds.
+
+id42-work is Apache-2.0 and is not relicensed.
+Upstream: https://github.com/ID42Studio/id42-work
+Pinned commit: 07eaa2a0787c206398b1296091fea1317f1ff27b
+Build arg: ID42_WORK_REF
 
 nanobot license text, from LICENSE at the pinned commit:
 

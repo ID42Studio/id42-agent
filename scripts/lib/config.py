@@ -26,7 +26,16 @@ ENV_KEYS = (
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_ALLOWED_USERS",
     "NANOBOT_WEB_TOKEN",
+    "ID42_WORK_ENABLED",
+    "ID42_WORK_FACTORY",
+    "ID42_WORK_PYTHONPATH",
 )
+
+# Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
+_FACTORY_RE = re.compile(r"\A[A-Za-z_][\w.]*:[A-Za-z_]\w*\Z")
+_DEFAULT_WORK_FACTORY = "id42_agent.mcp_host:server"
+_WORK_TOOL_TIMEOUT = 120
+_IMAGE_PYTHONPATH = "/opt/id42-agent"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -135,6 +144,143 @@ def _allowlist(raw: str) -> list[str]:
     return cleaned
 
 
+def _factory_error(value: str) -> str | None:
+    """Return an error when value is not module:callable, else None."""
+    module = value.split(":", 1)[0]
+    if not _FACTORY_RE.fullmatch(value) or ".." in value or module.endswith("."):
+        return (
+            "ID42_WORK_FACTORY must be module:callable, "
+            "for example id42_agent.mcp_host:server"
+        )
+    return None
+
+
+def _work_factory(raw: str) -> str:
+    factory = raw.strip() or _DEFAULT_WORK_FACTORY
+    error = _factory_error(factory)
+    if error:
+        raise ConfigError(error)
+    return factory
+
+
+def _work_pythonpath(raw: str) -> str:
+    """Return the MCP process PYTHONPATH. Empty means inherit the image default."""
+    value = raw.strip()
+    if not value:
+        return ""
+    if any(char.isspace() for char in value):
+        raise ConfigError("ID42_WORK_PYTHONPATH cannot contain whitespace")
+    cleaned: list[str] = []
+    for part in value.split(":"):
+        if not part.startswith("/") or part == "/":
+            raise ConfigError(
+                "ID42_WORK_PYTHONPATH must be a colon-separated list of absolute paths"
+            )
+        if ".." in part.split("/"):
+            raise ConfigError("ID42_WORK_PYTHONPATH cannot contain ..")
+        if part not in cleaned:
+            cleaned.append(part)
+    if _IMAGE_PYTHONPATH not in cleaned:
+        cleaned.insert(0, _IMAGE_PYTHONPATH)
+    return ":".join(cleaned)
+
+
+def _work_server(env: dict[str, str]) -> dict[str, object] | None:
+    """Stdio MCP server block, or None when ID42 Work is left off."""
+    enabled = _parse_bool("ID42_WORK_ENABLED", env["ID42_WORK_ENABLED"] or "false")
+    factory_raw = env["ID42_WORK_FACTORY"]
+    pythonpath_raw = env["ID42_WORK_PYTHONPATH"]
+    if not enabled:
+        if factory_raw.strip():
+            _work_factory(factory_raw)
+        if pythonpath_raw.strip():
+            _work_pythonpath(pythonpath_raw)
+        return None
+    server: dict[str, object] = {
+        "command": "id42-work",
+        "args": ["mcp", "serve", "--factory", _work_factory(factory_raw)],
+        "toolTimeout": _WORK_TOOL_TIMEOUT,
+        # nanobot's stdio client inherits PATH and HOME, not PYTHONPATH.
+        # The default factory is imported from /opt/id42-agent.
+        "env": {"PYTHONPATH": _work_pythonpath(pythonpath_raw) or _IMAGE_PYTHONPATH},
+    }
+    return server
+
+
+def mcp_server_errors(server: object) -> list[str]:
+    """Reject anything other than the stdio ``id42-work mcp serve`` command."""
+    label = "tools.mcpServers.id42-work"
+    if not isinstance(server, dict):
+        return [f"{label} is not an object"]
+    errors: list[str] = []
+    if server.get("command") != "id42-work":
+        errors.append(f"{label}.command must be id42-work")
+    url = server.get("url")
+    if isinstance(url, str) and url.strip():
+        errors.append(f"{label}.url must stay empty; the server is stdio only")
+    elif url not in (None, ""):
+        errors.append(f"{label}.url must stay empty; the server is stdio only")
+    transport = server.get("type")
+    if transport not in (None, "stdio"):
+        errors.append(f"{label}.type must be stdio or omitted")
+    args = server.get("args")
+    if (
+        not isinstance(args, list)
+        or len(args) != 4
+        or args[:3] != ["mcp", "serve", "--factory"]
+        or not isinstance(args[3], str)
+        or _factory_error(args[3])
+    ):
+        errors.append(f"{label}.args must be mcp serve --factory module:callable")
+    elif "--http" in args:
+        errors.append(f"{label} must not pass --http")
+    timeout = server.get("toolTimeout", _WORK_TOOL_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+        errors.append(f"{label}.toolTimeout must be a positive integer")
+    extra_env = server.get("env")
+    if extra_env is not None and (
+        not isinstance(extra_env, dict)
+        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in extra_env.items())
+    ):
+        errors.append(f"{label}.env must be a map of strings")
+        extra_env = None
+    factory = args[3] if isinstance(args, list) and len(args) == 4 else ""
+    pythonpath = ""
+    if isinstance(extra_env, dict):
+        pythonpath = extra_env.get("PYTHONPATH", "")
+    if factory == _DEFAULT_WORK_FACTORY and (
+        not isinstance(pythonpath, str) or _IMAGE_PYTHONPATH not in pythonpath.split(":")
+    ):
+        errors.append(
+            f"{label}.env.PYTHONPATH must include {_IMAGE_PYTHONPATH} "
+            "so the default factory can be imported"
+        )
+    if isinstance(pythonpath, str) and pythonpath:
+        for part in pythonpath.split(":"):
+            if not part.startswith("/") or ".." in part.split("/"):
+                errors.append(f"{label}.env.PYTHONPATH must be absolute paths")
+                break
+    return errors
+
+
+def mcp_config_errors(document: dict[str, object], *, enabled: bool) -> list[str]:
+    """Check tools.mcpServers.id42-work. Absence is an error only when enabled."""
+    tools = document.get("tools")
+    if not isinstance(tools, dict) or "mcpServers" not in tools:
+        if enabled:
+            return ["ID42_WORK_ENABLED is true but tools.mcpServers.id42-work is missing"]
+        return []
+    servers = tools.get("mcpServers")
+    if not isinstance(servers, dict):
+        return ["tools.mcpServers is not an object"]
+    server = servers.get("id42-work")
+    if server is None:
+        if enabled:
+            return ["ID42_WORK_ENABLED is true but tools.mcpServers.id42-work is missing"]
+        return []
+    return mcp_server_errors(server)
+
+
 def build_config(env: dict[str, str]) -> dict[str, object]:
     """Return the first-boot config.json object. Raises ConfigError when invalid."""
     picked = _pick(env)
@@ -170,6 +316,16 @@ def build_config(env: dict[str, str]) -> dict[str, object]:
             "mode": "polling",
         }
 
+    tools: dict[str, object] = {
+        "restrictToWorkspace": True,
+        "exec": {
+            "enable": False,
+        },
+    }
+    work_server = _work_server(picked)
+    if work_server is not None:
+        tools["mcpServers"] = {"id42-work": work_server}
+
     return {
         "agents": {
             "defaults": {
@@ -197,12 +353,7 @@ def build_config(env: dict[str, str]) -> dict[str, object]:
             "port": 18790,
         },
         "channels": channels,
-        "tools": {
-            "restrictToWorkspace": True,
-            "exec": {
-                "enable": False,
-            },
-        },
+        "tools": tools,
     }
 
 
@@ -321,6 +472,7 @@ def assert_volume() -> None:
             errors.append("agents.defaults.timezone is empty")
         expect(_dig(document, "tools", "restrictToWorkspace"), True, "tools.restrictToWorkspace")
         expect(_dig(document, "tools", "exec", "enable"), False, "tools.exec.enable")
+        errors.extend(mcp_config_errors(document, enabled=False))
         channels = document.get("channels")
         telegram = channels.get("telegram") if isinstance(channels, dict) else None
         if telegram is not None:
@@ -366,21 +518,37 @@ def _secret_values(document: dict[str, object]) -> list[str]:
     return found
 
 
-def validate_volume() -> None:
-    """Load config.json with nanobot itself. Secret values are stripped from errors."""
-    document = _load_json(_DATA_CONFIG)
+def validate_file(path: Path) -> None:
+    """Load a config file with nanobot itself. Secret values are stripped from errors."""
+    document = _load_json(path)
     try:
         from nanobot.config.loader import load_config
     except Exception as exc:
         raise ConfigError(f"nanobot is not importable: {exc}") from exc
     try:
-        load_config(_DATA_CONFIG)
+        load_config(path)
     except Exception as exc:
         text = str(exc)
         for secret in _secret_values(document):
             text = text.replace(secret, "[redacted]")
         raise ConfigError(f"nanobot rejected config.json: {text}") from exc
     print("config-valid")
+
+
+def validate_volume() -> None:
+    """Load the data-volume config.json with nanobot itself."""
+    validate_file(_DATA_CONFIG)
+
+
+def assert_mcp(config_path: Path, *, enabled: bool) -> None:
+    """Check the id42-work MCP block. Prints no secrets."""
+    document = _load_json(config_path)
+    errors = mcp_config_errors(document, enabled=enabled)
+    if errors:
+        for item in errors:
+            print(f"id42-agent: {item}", file=sys.stderr)
+        raise SystemExit(2)
+    print("mcp-config-ok")
 
 
 def public_summary(env_file: Path | None, config_path: Path | None) -> None:
@@ -396,6 +564,9 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             "telegram_token_set": bool(picked["TELEGRAM_BOT_TOKEN"].strip()),
             "telegram_allowlist_set": bool(picked["TELEGRAM_ALLOWED_USERS"].strip()),
             "web_token_set": bool(picked["NANOBOT_WEB_TOKEN"].strip()),
+            "ID42_WORK_ENABLED": picked["ID42_WORK_ENABLED"] or "false",
+            "ID42_WORK_FACTORY": picked["ID42_WORK_FACTORY"],
+            "id42_work_pythonpath_set": bool(picked["ID42_WORK_PYTHONPATH"].strip()),
         }
     if config_path is not None and config_path.is_file():
         document = _load_json(config_path)
@@ -420,6 +591,7 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             "timezone": _dig(document, "agents", "defaults", "timezone")
             if "agents" in document
             else None,
+            "id42_work_configured": bool(mcp_config_errors(document, enabled=True) == []),
         }
     print(json.dumps(summary, indent=2))
 
@@ -561,6 +733,14 @@ def _command(argv: list[str]) -> int:
     sub.add_parser("assert-volume")
     sub.add_parser("validate-volume")
 
+    validate_file_parser = sub.add_parser("validate-file")
+    validate_file_parser.add_argument("--config", type=Path, required=True)
+
+    mcp_parser = sub.add_parser("assert-mcp")
+    mcp_parser.add_argument("--config", type=Path, default=_DATA_CONFIG)
+    mcp_parser.add_argument("--enabled", choices=("true", "false"))
+    mcp_parser.add_argument("--env-file", type=Path)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "ensure-token":
@@ -579,6 +759,17 @@ def _command(argv: list[str]) -> int:
             assert_volume()
         elif args.command == "validate-volume":
             validate_volume()
+        elif args.command == "validate-file":
+            validate_file(args.config)
+        elif args.command == "assert-mcp":
+            if args.env_file is not None:
+                raw = load_env_file(args.env_file).get("ID42_WORK_ENABLED", "false")
+                enabled = _parse_bool("ID42_WORK_ENABLED", raw or "false")
+            elif args.enabled is not None:
+                enabled = args.enabled == "true"
+            else:
+                raise ConfigError("assert-mcp needs --enabled or --env-file")
+            assert_mcp(args.config, enabled=enabled)
         else:
             parser.error("unknown command")
     except ConfigError as exc:
