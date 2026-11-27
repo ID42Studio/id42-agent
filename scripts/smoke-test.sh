@@ -147,6 +147,28 @@ NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
 EOF
 expect_fail "telegram star allowlist" python3 "$CONFIG_PY" render --env-file "$WORKDIR/star.env" --output "$WORKDIR/star.json"
 
+cat >"$WORKDIR/bad-factory.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=../secrets:server
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "factory path" python3 "$CONFIG_PY" render --env-file "$WORKDIR/bad-factory.env" --output "$WORKDIR/bad-factory.json"
+
+cat >"$WORKDIR/bad-pythonpath.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_PYTHONPATH=relative/mod
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+expect_fail "relative pythonpath" python3 "$CONFIG_PY" render --env-file "$WORKDIR/bad-pythonpath.env" --output "$WORKDIR/bad-pythonpath.json"
+
 cat >"$ENV_FILE" <<'EOF'
 TZ=America/Sao_Paulo
 OLLAMA_BASE_URL=http://host.docker.internal:9/v1
@@ -172,7 +194,58 @@ assert doc["providers"]["ollama"]["apiBase"].endswith("/v1")
 assert doc["modelPresets"]["primary"]["model"] == "smoke-model"
 assert doc["channels"]["websocket"]["tokenIssueSecret"] == "smoke-web-token-do-not-leak"
 assert "telegram" not in doc["channels"]
-print("rendered config matches the phase 1 contract")
+assert "mcpServers" not in doc["tools"]
+print("rendered config matches the default contract")
+PY
+
+cat >"$WORKDIR/mcp.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=
+ID42_WORK_PYTHONPATH=/srv/id42-work-host
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+python3 "$CONFIG_PY" render --env-file "$WORKDIR/mcp.env" --output "$WORKDIR/mcp.json" \
+  >"$WORKDIR/mcp-render-stdout"
+if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/mcp-render-stdout"; then
+  id42_die "render printed the web token"
+fi
+python3 "$CONFIG_PY" assert-mcp --env-file "$WORKDIR/mcp.env" --config "$WORKDIR/mcp.json"
+python3 - "$WORKDIR/mcp.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+server = doc["tools"]["mcpServers"]["id42-work"]
+assert server["command"] == "id42-work"
+assert server["args"] == ["mcp", "serve", "--factory", "id42_agent.mcp_host:server"]
+assert server["toolTimeout"] == 120
+assert server["env"]["PYTHONPATH"] == "/opt/id42-agent:/srv/id42-work-host"
+assert "url" not in server
+assert "--http" not in server["args"]
+assert "ssrfWhitelist" not in doc["tools"]
+print("rendered id42-work server is stdio only")
+PY
+
+cat >"$WORKDIR/mcp-default-path.env" <<'EOF'
+TZ=America/Sao_Paulo
+OLLAMA_BASE_URL=http://host.docker.internal:9/v1
+OLLAMA_MODEL=smoke-model
+TELEGRAM_ENABLED=false
+ID42_WORK_ENABLED=true
+ID42_WORK_FACTORY=
+ID42_WORK_PYTHONPATH=
+NANOBOT_WEB_TOKEN=smoke-web-token-do-not-leak
+EOF
+python3 "$CONFIG_PY" render --env-file "$WORKDIR/mcp-default-path.env" \
+  --output "$WORKDIR/mcp-default-path.json" >"$WORKDIR/mcp-default-path-stdout"
+python3 - "$WORKDIR/mcp-default-path.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+server = doc["tools"]["mcpServers"]["id42-work"]
+assert server["env"]["PYTHONPATH"] == "/opt/id42-agent"
+print("default factory PYTHONPATH is the image module path")
 PY
 
 echo "== compose config =="
@@ -205,6 +278,27 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
 digest1=$(awk -F= '/token_sha256=/{print $2}' "$WORKDIR/assert1")
 digest2=$(awk -F= '/token_sha256=/{print $2}' "$WORKDIR/assert2")
 [[ -n "$digest1" && "$digest1" == "$digest2" ]] || id42_die "second bootstrap changed the web token"
+
+echo "== id42-work image =="
+# The rendered file is mode 0600. GitHub runners are not uid 1000, so the
+# container user could not read a 0600 bind. The temp directory is private.
+chmod a+r "$WORKDIR/mcp.json"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --no-build -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  -v "$CONFIG_PY:/tmp/id42_config.py:ro" \
+  -v "$WORKDIR/mcp.json:/tmp/mcp-config.json:ro" \
+  nanobot-gateway /tmp/id42_config.py validate-file --config /tmp/mcp-config.json \
+  | tee "$WORKDIR/mcp-valid"
+grep -q "config-valid" "$WORKDIR/mcp-valid"
+if grep -q "smoke-web-token-do-not-leak" "$WORKDIR/mcp-valid"; then
+  id42_die "nanobot validation printed the web token"
+fi
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps --no-build -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/mcp-probe"
+grep -q "mcp-stdio-ok" "$WORKDIR/mcp-probe"
 
 echo "== start gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
@@ -285,6 +379,14 @@ fi
 if ! grep -q "OK: running container binds loopback ports" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the security baseline"
+fi
+if ! grep -q "OK: id42-work MCP server answered on stdio" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work MCP server"
+fi
+if ! grep -q "OK: id42-work config is stdio-only" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work config"
 fi
 echo "OK doctor accepts the running gateway baseline"
 

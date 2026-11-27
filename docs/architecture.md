@@ -17,6 +17,7 @@ flowchart LR
   gateway --> volume
   gateway -->|"providers.ollama.apiBase"| ollama
   gateway -.->|optional| telegram
+  gateway -.->|"stdio child, opt-in"| work["id42-work mcp serve"]
 ```
 
 `nanobot-gateway` is the upstream image at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65`, started with `gateway`. `docker/entrypoint.sh` only checks that `config.json` is already on the volume, then execs upstream `entrypoint.sh`. That script drops to uid 1000 and, because `NANOBOT_DOCKER_BOOTSTRAP=1`, notices the existing file and does not rewrite it (`nanobot/cli/docker_bootstrap.py`).
@@ -63,6 +64,10 @@ Every key below exists at `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65`. Line numbe
 | `channels.telegram.allowFrom` | `TelegramConfig.allow_from`, `telegram/runtime.py:456` | `TELEGRAM_ALLOWED_USERS` |
 | `tools.restrictToWorkspace` | `ToolsConfig.restrict_to_workspace`, `schema.py:438` | `true` |
 | `tools.exec.enable` | `ExecToolConfig.enable`, `nanobot/agent/tools/shell_config.py:11` | `false` |
+| `tools.mcpServers.id42-work.command` | `MCPServerConfig.command`, `schema.py:415` | constant `id42-work`, only when `ID42_WORK_ENABLED=true` |
+| `tools.mcpServers.id42-work.args` | `MCPServerConfig.args`, `schema.py:416` | `mcp`, `serve`, `--factory`, then `ID42_WORK_FACTORY` or `id42_agent.mcp_host:server` |
+| `tools.mcpServers.id42-work.toolTimeout` | `MCPServerConfig.tool_timeout`, `schema.py:422` | `120` |
+| `tools.mcpServers.id42-work.env.PYTHONPATH` | `MCPServerConfig.env`, `schema.py:417` | `/opt/id42-agent`, then `ID42_WORK_PYTHONPATH` when that is set. nanobot's stdio client does not inherit `PYTHONPATH` |
 
 `channels` accepts channel objects as extra fields (`ChannelsConfig` `extra="allow"`, `schema.py:48`). Camel case is the on-disk form (`nanobot/config_base.py` `alias_generator=to_camel`). Ollama's registry default base is `http://localhost:11434/v1` (`nanobot/providers/registry.py`, provider `ollama`).
 
@@ -72,9 +77,11 @@ Env vars passed through from upstream, not invented here:
 |---|---|
 | `NANOBOT_DOCKER_BOOTSTRAP` | `entrypoint.sh` (gateway command runs `nanobot.cli.docker_bootstrap` when this is `1`) |
 | `NANOBOT_WEB_TOKEN` | `docker_bootstrap.py` when that bootstrap creates the file. We also copy it into `tokenIssueSecret` because the file already exists by then |
-| `NANOBOT_CHANNELS` | Docker build arg, `Dockerfile` (default `whatsapp`) |
+| `NANOBOT_CHANNELS` | Docker build arg, upstream `Dockerfile` (default `whatsapp`) |
 
 Not set, because they are not part of this pin's Compose path: `NANOBOT_API_KEY`, port `8900`, command `serve`.
+
+`ID42_WORK_REF` is a build arg of this repository's `Dockerfile`. It is not a nanobot variable. The default is `07eaa2a0787c206398b1296091fea1317f1ff27b`.
 
 ## Workspace seed
 
@@ -88,4 +95,12 @@ The seed in this repository is copied only while `config.json` is created, and o
 
 ## ID42 Work
 
-The agent runtime is replaceable. Policy over what it may execute is planned as an MCP server shipped with ID42 Work, attached later at `tools.mcpServers` (`MCPServerConfig` in `schema.py`). This phase leaves that map empty. See [roadmap.md](roadmap.md).
+`tools.mcpServers` is `ToolsConfig.mcp_servers` (`schema.py:455`). When `ID42_WORK_ENABLED=true`, bootstrap writes one entry, `id42-work`. `type` and `url` are omitted. A `command` is stdio (`nanobot/agent/tools/mcp.py`). The command is `id42-work mcp serve --factory <module:callable>`. Nothing is bound to a port, and `--http` is not passed. `tools.ssrfWhitelist` is left unset because the server is not an HTTP client of the gateway.
+
+The package is installed from `ID42Studio/id42-work` at `07eaa2a0787c206398b1296091fea1317f1ff27b` into `/opt/id42-work/venv`. That extra requires `mcp>=2.3`. This nanobot pin requires `mcp<2`, so the packages do not share a virtualenv. `/usr/local/bin/id42-work` is a symlink to the console script. `python` on `PATH` remains `/app/.venv/bin/python`.
+
+The default factory `id42_agent.mcp_host:server` lives at `/opt/id42-agent`. Bootstrap always sets `tools.mcpServers.id42-work.env.PYTHONPATH` to that directory, then appends `ID42_WORK_PYTHONPATH` when it is set. nanobot's stdio client keeps `PATH` and `HOME` and does not inherit `PYTHONPATH` (`mcp` 1.26 `get_default_environment`). Without the explicit value, `id42_agent` would not import. A factory you supply is host code: set `ID42_WORK_FACTORY` and, when the module is not in the image, `ID42_WORK_PYTHONPATH`. Do not put that module in the agent workspace. See [id42-work.md](id42-work.md).
+
+`enabledTools` is omitted, so it stays at the upstream default `["*"]` (`schema.py:423`), which registers tools and resources. `toolTimeout` is 120 seconds (`schema.py:422`; the upstream default is 30). A tool call returns when the runner returns, including at `WAITING_APPROVAL`.
+
+Changing `ID42_WORK_ENABLED` after the first init does not rewrite `config.json`. Same rule as the Ollama URL and the Telegram token.

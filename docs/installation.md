@@ -4,7 +4,7 @@
 
 - Linux or another host that runs Docker Engine and Docker Compose v2
 - Python 3.11 or newer on the host, used only by `scripts/bootstrap.sh` and `scripts/doctor.sh`
-- Git available to the Docker daemon (the image build clones the pinned nanobot commit)
+- Git available to the Docker daemon (the image build clones the pinned nanobot commit and the pinned id42-work commit)
 - An Ollama server. See [ollama.md](ollama.md) before the first init
 - Optional: a Telegram bot token and your numeric user id. See [telegram.md](telegram.md)
 
@@ -17,7 +17,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Set `OLLAMA_MODEL` to a model you have already pulled (`ollama list`). Leave `TELEGRAM_ENABLED=false` until the bot token and allowlist are filled in.
+Set `OLLAMA_MODEL` to a model you have already pulled (`ollama list`). Leave `TELEGRAM_ENABLED=false` until the bot token and allowlist are filled in. Leave `ID42_WORK_ENABLED=false` until you have read [ID42 Work](id42-work.md).
 
 `NANOBOT_WEB_TOKEN` may stay empty. Init generates a 32-byte hex token, writes it to `.env`, and does not print it.
 
@@ -35,7 +35,7 @@ Equivalent commands:
 docker compose up -d nanobot-gateway
 ```
 
-The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`.
+The first `make init` builds the image from `https://github.com/HKUDS/nanobot.git` at commit `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` with build arg `NANOBOT_CHANNELS=telegram`, then installs `id42-work[mcp]` at commit `07eaa2a0787c206398b1296091fea1317f1ff27b`. That build is the slow step (WebUI compile and Python dependencies). Later inits reuse the local image `id42-agent-nanobot:0.4.2`. `make build` is `docker compose --profile upstream build nanobot-gateway`.
 
 Init then:
 
@@ -71,7 +71,7 @@ make doctor
 make status
 ```
 
-`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token or the WebUI token.
+`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that `id42-work mcp serve` answers on stdio, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token or the WebUI token.
 
 ## Stop
 

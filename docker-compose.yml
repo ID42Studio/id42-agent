@@ -1,7 +1,8 @@
-# id42-agent phase 1.
+# id42-agent.
 # Runtime: HKUDS/nanobot v0.4.2 at 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65.
-# There is no official published image. Compose builds the upstream Dockerfile.
-# nanobot is MIT licensed. This repository's own files are Apache-2.0.
+# There is no official published image. Compose builds the upstream Dockerfile,
+# then Dockerfile installs id42-work[mcp] into a separate virtualenv.
+# nanobot is MIT licensed. id42-work and this repository's own files are Apache-2.0.
 # See NOTICE.
 
 name: id42-agent
@@ -10,11 +11,14 @@ x-nanobot: &nanobot
   image: id42-agent-nanobot:0.4.2
   pull_policy: never
   build:
-    context: https://github.com/HKUDS/nanobot.git#0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
+    context: .
     dockerfile: Dockerfile
+    additional_contexts:
+      # Built from the upstream Dockerfile. Keep the git pin in sync with NOTICE.
+      upstream: service:nanobot-upstream
     args:
-      # Upstream default is whatsapp (Dockerfile ARG NANOBOT_CHANNELS).
-      NANOBOT_CHANNELS: telegram
+      # Full commit. A branch name is not a pin. Keep in sync with Dockerfile.
+      ID42_WORK_REF: ${ID42_WORK_REF:-07eaa2a0787c206398b1296091fea1317f1ff27b}
   environment:
     TZ: ${TZ:-America/Sao_Paulo}
     NANOBOT_DOCKER_BOOTSTRAP: "1"
@@ -38,12 +42,29 @@ x-nanobot: &nanobot
     - no-new-privileges:true
   labels:
     - org.opencontainers.image.title=id42-agent
-    - org.opencontainers.image.description=Personal nanobot gateway pinned to HKUDS/nanobot v0.4.2
+    - org.opencontainers.image.description=Personal nanobot gateway pinned to HKUDS/nanobot v0.4.2, with id42-work
     - org.opencontainers.image.revision=0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
     - org.opencontainers.image.source=https://github.com/HKUDS/nanobot
-    - org.opencontainers.image.licenses=MIT
+    - org.opencontainers.image.licenses=MIT AND Apache-2.0
 
 services:
+  # Build-only. `docker compose up` does not start it. `make build` passes
+  # `--profile upstream` so Compose can use the resulting image as the
+  # gateway's base. The entrypoint exits if the profile is started by hand.
+  nanobot-upstream:
+    profiles:
+      - upstream
+    image: id42-agent-nanobot-upstream:0.4.2
+    pull_policy: never
+    build:
+      context: https://github.com/HKUDS/nanobot.git#0dc8679edcc6061fbcdf3de13c7e16000e9d1b65
+      dockerfile: Dockerfile
+      args:
+        # Upstream default is whatsapp (Dockerfile ARG NANOBOT_CHANNELS).
+        NANOBOT_CHANNELS: telegram
+    entrypoint: ["true"]
+    restart: "no"
+
   nanobot-gateway:
     <<: *nanobot
     command: ["gateway"]

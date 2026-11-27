@@ -12,18 +12,18 @@ This repository. One person, one machine.
 - Telegram long polling with a mandatory allowlist when enabled
 - Shell tool off, workspace restriction on
 - First-boot config that does not overwrite later WebUI edits
-- `scripts/doctor.sh` and a CI smoke test that only checks that the gateway becomes healthy
+- `id42-work[mcp]` installed in the image, attached over stdio only when `ID42_WORK_ENABLED=true`
+- `scripts/doctor.sh` and a CI smoke test that checks that the gateway becomes healthy and that `id42-work mcp serve` answers on stdio
 
-Out of this version: backup and restore, a standalone API, Postgres, and any ID42 Work connection.
+Out of this version: backup and restore, a standalone API, and Postgres.
 
 ## v0.2 — governed agent
 
-The agent still decides what it wants to do. ID42 Work governs what is allowed to run.
+The agent still decides what it wants to do. ID42 Work governs what is allowed to run. The stdio attachment is in the image. What is still open:
 
-- Ship an MCP server as `id42-work[mcp]`
-- Attach it through nanobot's existing `tools.mcpServers` entry (stdio or HTTP). No fork of nanobot required for that slot
-- The MCP server is the policy point for tools that have side effects: what may run, against which records, and with which audit trail
-- Keep the v0.1 loopback deployment working without that server
+- Works, policies and a durable store supplied by the operator. The image default registers no works and keeps state in process memory
+- The MCP server remains the policy point for tools that have side effects: what may run, against which records, and with which audit trail
+- Keep the loopback deployment working with `ID42_WORK_ENABLED=false`
 
 ## v0.3 — business connectors
 

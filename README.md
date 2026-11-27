@@ -2,7 +2,7 @@
 
 Self-hosted, personal distribution of [nanobot](https://github.com/HKUDS/nanobot) for daily use with an existing Ollama server, optional Telegram, and the bundled WebUI.
 
-This repository does not fork the agent. It pins one upstream commit, builds that Dockerfile, and supplies a tighter Compose file plus a first-boot config. The agent decides what to do. A later release of ID42 Work will govern execution through an MCP server (`id42-work[mcp]`). That server is not part of this phase.
+This repository does not fork the agent. It pins one upstream commit, builds that Dockerfile, and supplies a tighter Compose file plus a first-boot config. The agent decides what to do. ID42 Work governs execution through `id42-work[mcp]`, installed in the image and attached over stdio when you opt in. See [ID42 Work](docs/id42-work.md).
 
 ## Pin
 
@@ -11,8 +11,9 @@ This repository does not fork the agent. It pins one upstream commit, builds tha
 | Upstream | `HKUDS/nanobot` |
 | Release | `v0.4.2` |
 | Commit | `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` |
+| ID42 Work | `07eaa2a0787c206398b1296091fea1317f1ff27b` (`id42-work[mcp]`) |
 
-Do not track `main`. There is no official published image. Compose builds the upstream Dockerfile with `NANOBOT_CHANNELS=telegram`.
+Do not track `main`. There is no official published image. Compose builds the upstream Dockerfile with `NANOBOT_CHANNELS=telegram`, then installs the pinned id42-work commit into a separate virtualenv. Override that commit with the build arg `ID42_WORK_REF`.
 
 nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Apache-2.0 (`LICENSE`).
 
@@ -23,10 +24,11 @@ nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Ap
 - Ollama via `providers.ollama.apiBase` (default: the host, through `host.docker.internal`)
 - Telegram off until you set a token and an allowlist
 - Shell tool off, workspace restriction on
+- `id42-work` on `PATH`. The MCP server is off until `ID42_WORK_ENABLED=true`, then it is a stdio child of the gateway. No extra published port
 - `nanobot-cli` under the `cli` profile (`status`, and any other nanobot command)
 - Optional `ollama` service under the `ollama` profile
 
-Not in this phase: backup/restore, a public API service, Postgres, or the ID42 Work MCP server. Upstream `v0.4.2` removed `nanobot serve` and has no `doctor` command. `scripts/doctor.sh` is this distribution's check, not a nanobot subcommand.
+Not in this phase: backup/restore, a public API service, or Postgres. Upstream `v0.4.2` removed `nanobot serve` and has no `doctor` command. `scripts/doctor.sh` is this distribution's check, not a nanobot subcommand.
 
 ## Requirements
 
@@ -89,6 +91,7 @@ Changing `OLLAMA_MODEL`, the Ollama URL, or the Telegram token in `.env` after t
 - [Installation](docs/installation.md)
 - [Ollama](docs/ollama.md)
 - [Telegram](docs/telegram.md)
+- [ID42 Work](docs/id42-work.md)
 - [Security](docs/security.md)
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)

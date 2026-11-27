@@ -68,7 +68,9 @@ for item in ports:
     if host_ip not in {"127.0.0.1", "::1"}:
         errors.append(f"published port {published}->{target} is bound to {host_ip or 'all interfaces'}")
 missing = wanted - seen
+extra = seen - wanted
 errors.extend(f"missing published port {name}" for name in sorted(missing))
+errors.extend(f"unexpected published port {name}" for name in sorted(extra))
 if errors:
     print("\n".join(errors), file=sys.stderr)
     sys.exit(1)
@@ -109,6 +111,58 @@ PY
   else
     good "GET /health returned ready"
   fi
+fi
+
+if "${COMPOSE[@]}" run --rm --no-deps --no-build -T --user 1000 \
+  --entrypoint /app/.venv/bin/python \
+  nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py"
+then
+  good "id42-work MCP server answered on stdio"
+else
+  bad "id42-work MCP server did not answer on stdio"
+fi
+
+if [[ -n "$container_id" ]]; then
+  pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
+  pin=${pin//$'\r'/}
+  pin=${pin//$'\n'/}
+  if [[ ! "$pin" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    bad "id42-work pin file is missing or invalid"
+  else
+    good "id42-work pin is $pin"
+  fi
+
+  work_enabled=$(
+    python3 - "$ENV_FILE" "$ROOT/scripts/lib" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+from config import load_env_file
+
+env = load_env_file(Path(sys.argv[1]))
+print(env.get("ID42_WORK_ENABLED", "false").strip().lower() or "false")
+PY
+  )
+  case "$work_enabled" in
+    true|yes|on|1) work_enabled=true ;;
+    false|no|off|0) work_enabled=false ;;
+    *)
+      bad "ID42_WORK_ENABLED must be true or false"
+      work_enabled=""
+      ;;
+  esac
+  if [[ -n "$work_enabled" ]]; then
+    if "${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /app/.venv/bin/python - \
+      assert-mcp --enabled "$work_enabled" <"$CONFIG_PY"
+    then
+      good "id42-work config is stdio-only"
+    else
+      bad "id42-work config check failed"
+    fi
+  fi
+else
+  bad "skipped the id42-work config check because the gateway is not running"
 fi
 
 probe_script=$(mktemp)

@@ -28,9 +28,10 @@ cleanup() {
 trap cleanup EXIT
 
 python3 "$CONFIG_PY" render --env-file "$ENV_FILE" --output "$rendered"
+python3 "$CONFIG_PY" assert-mcp --env-file "$ENV_FILE" --config "$rendered"
 
-echo "Building the pinned nanobot image (first build fetches upstream and can take several minutes)..."
-id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" build nanobot-gateway
+echo "Building the pinned nanobot image and installing id42-work (first build fetches upstream and can take several minutes)..."
+id42_compose "$ENV_FILE" -f "$ROOT/docker-compose.yml" --profile upstream build nanobot-gateway
 
 # The image creates /home/nanobot/.nanobot as uid 1000. With cap_drop ALL, root
 # cannot write that directory (no CAP_DAC_OVERRIDE). chown of the mount point
