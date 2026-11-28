@@ -24,5 +24,9 @@ if [ -z "${ID42_WORK_WEB_TOKEN:-}" ]; then
 fi
 
 export PYTHONPATH="/opt/id42-agent${PYTHONPATH:+:$PYTHONPATH}"
+if ! /opt/id42-work/venv/bin/python -m id42_agent.materialize; then
+    echo "id42-agent: could not store inline secrets as files." >&2
+    exit 1
+fi
 exec setpriv --reuid=nanobot --regid=nanobot --init-groups \
     /opt/id42-work/venv/bin/python -m id42_agent.web_front

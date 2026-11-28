@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import secrets
 import sys
@@ -33,6 +34,7 @@ ENV_KEYS = (
     "ID42_WORK_AUTHORITY_KEY_PATH",
     "ID42_WORK_STORAGE",
     "ID42_WORK_DATABASE_URL",
+    "ID42_WORK_DATABASE_URL_FILE",
     "ID42_WORK_WEB_TOKEN",
     "ID42_WORK_WEB_TOKEN_FILE",
     "ID42_WORK_ODOO_ENABLED",
@@ -62,6 +64,14 @@ _IMAGE_PYTHONPATH = "/opt/id42-agent"
 _AUTHORITY_ENV = "ID42_WORK_AUTHORITY_KEY_PATH"
 _STORAGE_ENV = "ID42_WORK_STORAGE"
 _DATABASE_ENV = "ID42_WORK_DATABASE_URL"
+_DATABASE_FILE_ENV = "ID42_WORK_DATABASE_URL_FILE"
+# Keep in sync with docker/id42_agent/materialize.py.
+_DEFAULT_DATABASE_FILE = "/var/lib/id42-work/secrets/database.url"
+_DEFAULT_ODOO_FILE = "/var/lib/id42-work/secrets/odoo.key"
+_DEFAULT_GITHUB_FILE = "/var/lib/id42-work/secrets/github.token"
+_WEB_TOKEN_REF = "${NANOBOT_WEB_TOKEN}"
+_TELEGRAM_TOKEN_REF = "${TELEGRAM_BOT_TOKEN}"
+_ENV_REF = re.compile(r"\A\$\{([A-Za-z_][A-Za-z0-9_]*)\}\Z")
 # Keep in sync with docker/id42_agent/mcp_host.py DEFAULT_AUTHORITY_KEY.
 _DEFAULT_AUTHORITY_KEY = "/var/lib/id42-work/authority.key"
 # Keep in sync with docker/id42_agent/mcp_host.py storage_backend.
@@ -254,38 +264,68 @@ def _database_url_error(value: str) -> str | None:
     return None
 
 
-def _storage_choice(storage_raw: str, url_raw: str) -> tuple[str, str]:
-    """Return ``(sqlite|postgres, url)``. SQLite drops the URL."""
+def _storage_choice(storage_raw: str, url_raw: str, file_raw: str) -> tuple[str, str]:
+    """Return ``(sqlite|postgres, file path)``. The URL is never returned.
+
+    SQLite drops both. Postgres writes a file path: the operator's
+    ``ID42_WORK_DATABASE_URL_FILE``, or the path the entrypoint fills from
+    an inline URL. A previous volume may still contain the URL itself.
+    """
     storage = storage_raw.strip().lower()
     if storage in {"", _STORAGE_SQLITE}:
         return _STORAGE_SQLITE, ""
     if storage != _STORAGE_POSTGRES:
         raise ConfigError(f"{_STORAGE_ENV} must be sqlite or postgres")
     url = url_raw.strip()
-    error = _database_url_error(url)
-    if error:
-        raise ConfigError(error)
-    return _STORAGE_POSTGRES, url
+    file_path = file_raw.strip()
+    if url:
+        error = _database_url_error(url)
+        if error:
+            raise ConfigError(error)
+    if file_path:
+        path_error = _secret_file_error(file_path, _DATABASE_FILE_ENV)
+        if path_error:
+            raise ConfigError(path_error)
+    if not url and not file_path:
+        raise ConfigError(
+            f"{_DATABASE_ENV} or {_DATABASE_FILE_ENV} is required when {_STORAGE_ENV}=postgres"
+        )
+    return _STORAGE_POSTGRES, file_path or _DEFAULT_DATABASE_FILE
 
 
 def _mcp_storage_errors(extra_env: Mapping[str, str]) -> list[str]:
-    """Reject a storage env map the factory would not open. No secret text."""
+    """Reject a storage env map the factory would not open. No secret text.
+
+    A new render stores ``ID42_WORK_DATABASE_URL_FILE``. A volume rendered
+    before that still stores ``ID42_WORK_DATABASE_URL``. Either is accepted.
+    """
     storage = extra_env.get(_STORAGE_ENV, "").strip()
     url = extra_env.get(_DATABASE_ENV, "").strip()
-    if not storage and not url:
+    file_path = extra_env.get(_DATABASE_FILE_ENV, "").strip()
+    if not storage and not url and not file_path:
         return []
     if storage.lower() in {"", _STORAGE_SQLITE}:
-        if url:
+        if url or file_path:
             return [f"{_DATABASE_ENV} is set only when {_STORAGE_ENV}=postgres"]
         if storage and storage.lower() != _STORAGE_SQLITE:
             return [f"{_STORAGE_ENV} must be sqlite or postgres"]
         return []
     if storage.lower() != _STORAGE_POSTGRES:
         return [f"{_STORAGE_ENV} must be sqlite or postgres"]
-    error = _database_url_error(url)
-    if error:
-        return [error]
-    return []
+    errors: list[str] = []
+    if url:
+        error = _database_url_error(url)
+        if error:
+            errors.append(error)
+    if file_path:
+        path_error = _secret_file_error(file_path, _DATABASE_FILE_ENV)
+        if path_error:
+            errors.append(path_error)
+    if not url and not file_path:
+        errors.append(
+            f"{_DATABASE_ENV} or {_DATABASE_FILE_ENV} is required when {_STORAGE_ENV}=postgres"
+        )
+    return errors
 
 
 def _work_pythonpath(raw: str) -> str:
@@ -337,8 +377,6 @@ def _connector_server_env(env: Mapping[str, str]) -> dict[str, str]:
             "ODOO_URL",
             "ODOO_DB",
             "ODOO_USER",
-            "ODOO_API_KEY",
-            "ODOO_API_KEY_FILE",
             "ODOO_PROTOCOL",
             "ODOO_TIMEOUT",
             "ID42_WORK_ODOO_READ_MODELS",
@@ -348,20 +386,25 @@ def _connector_server_env(env: Mapping[str, str]) -> dict[str, str]:
             value = env.get(name, "").strip()
             if value:
                 copied[name] = value
+        key_file = env.get("ODOO_API_KEY_FILE", "").strip()
+        if key_file:
+            copied["ODOO_API_KEY_FILE"] = key_file
+        elif env.get("ODOO_API_KEY", "").strip():
+            copied["ODOO_API_KEY_FILE"] = _DEFAULT_ODOO_FILE
     if _parse_bool("ID42_WORK_GITHUB_ENABLED", env.get("ID42_WORK_GITHUB_ENABLED", "") or "false"):
         copied["ID42_WORK_GITHUB_ENABLED"] = "true"
         for name in (
             "ID42_WORK_GITHUB_REPOSITORIES",
-            "ID42_WORK_GITHUB_TOKEN_FILE",
             "ID42_WORK_GITHUB_OPERATION_LOG",
         ):
             value = env.get(name, "").strip()
             if value:
                 copied[name] = value
-        if not env.get("ID42_WORK_GITHUB_TOKEN_FILE", "").strip():
-            token = env.get("GITHUB_TOKEN", "").strip()
-            if token:
-                copied["GITHUB_TOKEN"] = token
+        token_file = env.get("ID42_WORK_GITHUB_TOKEN_FILE", "").strip()
+        if token_file:
+            copied["ID42_WORK_GITHUB_TOKEN_FILE"] = token_file
+        elif env.get("GITHUB_TOKEN", "").strip():
+            copied["ID42_WORK_GITHUB_TOKEN_FILE"] = _DEFAULT_GITHUB_FILE
     return copied
 
 
@@ -516,9 +559,10 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     factory_raw = env["ID42_WORK_FACTORY"]
     pythonpath_raw = env["ID42_WORK_PYTHONPATH"]
     key_path = _authority_key_path(env.get(_AUTHORITY_ENV, ""))
-    storage, database_url = _storage_choice(
+    storage, database_file = _storage_choice(
         env.get(_STORAGE_ENV, ""),
         env.get(_DATABASE_ENV, ""),
+        env.get(_DATABASE_FILE_ENV, ""),
     )
     if not enabled:
         if factory_raw.strip():
@@ -530,13 +574,14 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     # The default factory is imported from /opt/id42-agent. An unset key path
     # stays out of this map: the factory then uses /var/lib/id42-work/authority.key.
     # SQLite is the default, so those keys stay out of the map unless Postgres
-    # is selected. The database URL is a secret and is written only then.
+    # is selected. The database URL is not written. The child receives a
+    # mode 0600 file path and reads the URL from that file.
     server_env = {"PYTHONPATH": _work_pythonpath(pythonpath_raw) or _IMAGE_PYTHONPATH}
     if key_path:
         server_env[_AUTHORITY_ENV] = key_path
     if storage == _STORAGE_POSTGRES:
         server_env[_STORAGE_ENV] = _STORAGE_POSTGRES
-        server_env[_DATABASE_ENV] = database_url
+        server_env[_DATABASE_FILE_ENV] = database_file
     server_env.update(_connector_server_env(env))
     server: dict[str, object] = {
         "command": "id42-work",
@@ -656,7 +701,7 @@ def build_config(env: dict[str, str]) -> dict[str, object]:
             "enabled": True,
             "host": "0.0.0.0",
             "port": 8765,
-            "tokenIssueSecret": web_token,
+            "tokenIssueSecret": _WEB_TOKEN_REF,
             "websocketRequiresToken": True,
         }
     }
@@ -666,13 +711,14 @@ def build_config(env: dict[str, str]) -> dict[str, object]:
             raise ConfigError("TELEGRAM_BOT_TOKEN is required when TELEGRAM_ENABLED=true")
         channels["telegram"] = {
             "enabled": True,
-            "token": token,
+            "token": _TELEGRAM_TOKEN_REF,
             "allowFrom": _allowlist(picked["TELEGRAM_ALLOWED_USERS"]),
             "mode": "polling",
         }
 
     tools: dict[str, object] = {
         "restrictToWorkspace": True,
+        "webuiAllowRemotePackageInstall": False,
         "exec": {
             "enable": False,
         },
@@ -826,6 +872,11 @@ def assert_volume() -> None:
         if not isinstance(timezone, str) or not timezone.strip():
             errors.append("agents.defaults.timezone is empty")
         expect(_dig(document, "tools", "restrictToWorkspace"), True, "tools.restrictToWorkspace")
+        expect(
+            _dig(document, "tools", "webuiAllowRemotePackageInstall"),
+            False,
+            "tools.webuiAllowRemotePackageInstall",
+        )
         expect(_dig(document, "tools", "exec", "enable"), False, "tools.exec.enable")
         errors.extend(mcp_config_errors(document, enabled=False))
         channels = document.get("channels")
@@ -876,12 +927,15 @@ def _secret_values(document: dict[str, object]) -> list[str]:
     servers = tools.get("mcpServers") if isinstance(tools, dict) else None
     server = servers.get("id42-work") if isinstance(servers, dict) else None
     extra = server.get("env") if isinstance(server, dict) else None
-    url = extra.get(_DATABASE_ENV) if isinstance(extra, dict) else None
-    if isinstance(url, str) and url.strip():
-        _append_secret(found, url)
-        if "://" in url:
-            password = urlparse(url).password
-            _append_secret(found, password)
+    if isinstance(extra, dict):
+        url = extra.get(_DATABASE_ENV)
+        if isinstance(url, str) and url.strip() and _ENV_REF.fullmatch(url.strip()) is None:
+            _append_secret(found, url)
+            if "://" in url:
+                password = urlparse(url).password
+                _append_secret(found, password)
+        for name in ("ODOO_API_KEY", "GITHUB_TOKEN", "ID42_WORK_WEB_TOKEN"):
+            _append_secret(found, extra.get(name))
     return found
 
 
@@ -938,6 +992,7 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             or _DEFAULT_AUTHORITY_KEY,
             "ID42_WORK_STORAGE": (picked["ID42_WORK_STORAGE"].strip().lower() or _STORAGE_SQLITE),
             "id42_work_database_url_set": bool(picked["ID42_WORK_DATABASE_URL"].strip()),
+            "id42_work_database_file_set": bool(picked["ID42_WORK_DATABASE_URL_FILE"].strip()),
             "id42_work_web_token_set": bool(picked["ID42_WORK_WEB_TOKEN"].strip()),
             "ID42_WORK_WEB_TOKEN_FILE": picked["ID42_WORK_WEB_TOKEN_FILE"].strip(),
             "ID42_WORK_ODOO_ENABLED": picked["ID42_WORK_ODOO_ENABLED"] or "false",
@@ -1027,6 +1082,14 @@ def telegram_getme_from_env(path: Path) -> None:
     print(json.dumps(telegram_getme(token)))
 
 
+def expand_env_ref(value: str) -> str:
+    """Replace a whole-string ``${NAME}`` with the process environment."""
+    match = _ENV_REF.fullmatch(value.strip())
+    if match is None:
+        return value
+    return os.environ.get(match.group(1), "")
+
+
 def telegram_getme_from_config(path: Path) -> None:
     document = _load_json(path)
     channels = document.get("channels")
@@ -1034,7 +1097,54 @@ def telegram_getme_from_config(path: Path) -> None:
     token = telegram.get("token") if isinstance(telegram, dict) else ""
     if not isinstance(token, str):
         raise ConfigError("channels.telegram.token is missing")
-    print(json.dumps(telegram_getme(token)))
+    print(json.dumps(telegram_getme(expand_env_ref(token))))
+
+
+def secret_warnings(env: Mapping[str, str]) -> list[str]:
+    """Names and recommendations for inline secrets. Values are not included."""
+    warnings: list[str] = []
+    url = env.get("ID42_WORK_DATABASE_URL", "").strip()
+    url_file = env.get("ID42_WORK_DATABASE_URL_FILE", "").strip()
+    if url and url_file:
+        warnings.append(
+            "ID42_WORK_DATABASE_URL and ID42_WORK_DATABASE_URL_FILE are both set; "
+            "the stdio child uses the file and operator scripts use the URL. "
+            "Prefer ID42_WORK_DATABASE_URL_FILE alone"
+        )
+    elif url:
+        warnings.append(
+            "ID42_WORK_DATABASE_URL is inline; prefer ID42_WORK_DATABASE_URL_FILE "
+            "(mode 0600). A new render stores the file path, and startup writes "
+            "the URL into that file"
+        )
+    if env.get("ODOO_API_KEY", "").strip():
+        warnings.append("ODOO_API_KEY is inline; prefer ODOO_API_KEY_FILE (mode 0600)")
+    if env.get("GITHUB_TOKEN", "").strip():
+        warnings.append(
+            "GITHUB_TOKEN is inline; prefer ID42_WORK_GITHUB_TOKEN_FILE (mode 0600)"
+        )
+    if env.get("ID42_WORK_WEB_TOKEN", "").strip() and not env.get(
+        "ID42_WORK_WEB_TOKEN_FILE", ""
+    ).strip():
+        warnings.append(
+            "ID42_WORK_WEB_TOKEN is inline; prefer ID42_WORK_WEB_TOKEN_FILE (mode 0600)"
+        )
+    if env.get("NANOBOT_WEB_TOKEN", "").strip():
+        warnings.append(
+            "NANOBOT_WEB_TOKEN is inline; config.json stores ${NANOBOT_WEB_TOKEN}. "
+            "This nanobot pin has no file field for tokenIssueSecret"
+        )
+    if env.get("TELEGRAM_BOT_TOKEN", "").strip():
+        warnings.append(
+            "TELEGRAM_BOT_TOKEN is inline; config.json stores ${TELEGRAM_BOT_TOKEN}. "
+            "This nanobot pin has no file field for channels.telegram.token"
+        )
+    return warnings
+
+
+def print_secret_warnings(path: Path) -> None:
+    for line in secret_warnings(load_env_file(path)):
+        print(line)
 
 
 def ollama_models(base_url: str) -> list[str]:
@@ -1102,6 +1212,9 @@ def _command(argv: list[str]) -> int:
     summary.add_argument("--env-file", type=Path)
     summary.add_argument("--config", type=Path)
 
+    warnings = sub.add_parser("secret-warnings")
+    warnings.add_argument("--env-file", type=Path, required=True)
+
     getme_env = sub.add_parser("telegram-getme-env")
     getme_env.add_argument("--env-file", type=Path, required=True)
 
@@ -1131,6 +1244,8 @@ def _command(argv: list[str]) -> int:
             render(args.env_file, args.output)
         elif args.command == "summary":
             public_summary(args.env_file, args.config)
+        elif args.command == "secret-warnings":
+            print_secret_warnings(args.env_file)
         elif args.command == "telegram-getme-env":
             telegram_getme_from_env(args.env_file)
         elif args.command == "telegram-getme-config":

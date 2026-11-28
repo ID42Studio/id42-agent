@@ -89,7 +89,7 @@ docker compose --profile postgres up -d
 
 The URL's user, password, and database have to match `ID42_POSTGRES_USER`, `ID42_POSTGRES_PASSWORD`, and `ID42_POSTGRES_DB`. Compose reads those three for the database container. The service publishes no host port. The gateway reaches it as `postgres` on the Compose network. A `$` in a password is written as `$$` because Compose expands `$`.
 
-When `ID42_WORK_ENABLED=true`, the first init copies `ID42_WORK_STORAGE` and `ID42_WORK_DATABASE_URL` into `tools.mcpServers.id42-work.env`. The stdio child does not inherit the gateway environment. The operator scripts do: `docker compose run` applies the gateway service environment, which carries the same two variables. An existing `config.json` is not rewritten. If you change the backend later, put the same values in that `env` map or the MCP child stays on the old backend while the scripts follow `.env`.
+When `ID42_WORK_ENABLED=true`, the first init copies `ID42_WORK_STORAGE` and `ID42_WORK_DATABASE_URL_FILE` into `tools.mcpServers.id42-work.env`. The URL itself is not copied. The stdio child does not inherit the gateway environment. It reads the file. The operator scripts do inherit the service environment, which still carries `ID42_WORK_DATABASE_URL` when that is set, and the factory uses the URL when it is set. An existing `config.json` is not rewritten. A file rendered earlier may still contain the URL. If you change the backend later, put the same storage name and a file path in that `env` map or the MCP child stays on the old backend while the scripts follow `.env`.
 
 The database password is a secret. Doctor reports `postgres` and whether the connection works. It does not print the URL. `docker compose down -v` deletes `id42-postgres-data` as well as `id42-work-data`.
 
@@ -224,7 +224,7 @@ The action id for `note` is `append-note`. The command is not an MCP tool.
 
 The same decisions can be made in a browser. Profile `id42-work-web` runs `id42-work web serve` against `id42_agent.mcp_host:server`, the same store, and the same authority key. It is not started by `make up`.
 
-`id42-work web serve` accepts only a loopback bind. Docker's port map reaches the container address, not `127.0.0.1` inside the container, so `docker/web-entrypoint.sh` starts the UI on `127.0.0.1:8768` and copies bytes from port `8767` to that listener. Compose publishes `127.0.0.1:8767` on the host. Leave that host address on loopback. Another container on the Compose network can reach port 8767. The token is still required.
+`id42-work web serve` accepts only a loopback bind. Docker's port map reaches the container address, not `127.0.0.1` inside the container, so `docker/web-entrypoint.sh` starts the UI on `127.0.0.1:8768` and copies bytes from port `8767` on the `id42-operator` network to that listener. It does not listen on the store network. `id42-work-web-publish` is attached only to `id42-operator` and Compose publishes that container on `127.0.0.1:8767`. Leave that host address on loopback. A container on the Compose default network cannot open the port. The token is still required. `id42-operator` is an internal network, subnet `10.42.76.0/24` unless `ID42_OPERATOR_SUBNET` is set. Two projects on one host that both publish the UI need different subnets.
 
 Set one secret in `.env`. Prefer a file so the value is not also in the process environment as text you typed into a shell:
 
@@ -237,7 +237,7 @@ ID42_WORK_WEB_TOKEN=replace-with-a-long-random-value
 A set `ID42_WORK_WEB_TOKEN_FILE` wins over `ID42_WORK_WEB_TOKEN`. The file must be a regular file inside the container, mode `0600`, not a symlink, one UTF-8 line, at most 4096 bytes. The token is compared as a SHA-256 digest. It is not a process argument, it is not written into `config.json`, and the pages do not render it.
 
 ```bash
-docker compose --profile id42-work-web up -d id42-work-web
+docker compose --profile id42-work-web up -d id42-work-web-publish
 ```
 
 Open `http://127.0.0.1:8767/`. Sign in with the token and actor id `id42-operator`. Pending approvals are on `/`. Uncertain calls are on `/reconcile`. Approve and reject match `scripts/work-approve.sh`. Applied, not-applied, and abandon match `scripts/work-reconcile.sh`. Reject and abandon ask for confirmation first. Resume stays off unless the form asks for it, and resume continues as `id42-agent`. The page is not an MCP tool.
@@ -248,7 +248,7 @@ From another computer, tunnel rather than changing the host bind:
 ssh -L 8767:127.0.0.1:8767 user@host
 ```
 
-`ID42_WORK_WEB_PUBLISH_PORT` changes the host port. The container port stays 8767. When `ID42_WORK_STORAGE=postgres`, start the `postgres` profile as well. The UI uses the same `ID42_WORK_DATABASE_URL` as the gateway. `ID42_WORK_AUTHORITY_KEY_PATH` on this service follows `.env`. Empty keeps `/var/lib/id42-work/authority.key`.
+`ID42_WORK_WEB_PUBLISH_PORT` changes the host port. The publisher's container port stays 8767. When `ID42_WORK_STORAGE=postgres`, start the `postgres` profile as well. The UI container is on `id42-store`, so the hostname `postgres` resolves. It uses `ID42_WORK_DATABASE_URL` from the service environment when that is set. `ID42_WORK_AUTHORITY_KEY_PATH` on this service follows `.env`. Empty keeps `/var/lib/id42-work/authority.key`.
 
 ## Connectors
 
@@ -265,7 +265,7 @@ Odoo needs `ODOO_URL`, `ODOO_DB`, `ODOO_USER`, and `ODOO_API_KEY` or `ODOO_API_K
 
 GitHub needs `ID42_WORK_GITHUB_REPOSITORIES`, a comma-separated `owner/name` allow-list. A repository that is not listed is refused before any request. Set `GITHUB_TOKEN` or `ID42_WORK_GITHUB_TOKEN_FILE`, not both. The file must be mode `0600`, owned by the process user, and not a symlink. `trust_env` stays false, so the token is not sent to a proxy from the environment. The operation log defaults to `/var/lib/id42-work/github-operations.sqlite`. `ID42_WORK_GITHUB_OPERATION_LOG` moves it. The path must be absolute and must not sit under `/home` or `/root`.
 
-Prefer the files. An inline `ODOO_API_KEY` or `GITHUB_TOKEN` is copied into `config.json` for the stdio child, because that child does not inherit the gateway environment. A file path is copied instead of the secret. The operator scripts and the operator UI read the same variables from the Compose service environment. Leave the flags false and the child env omits them, even if a URL or token is still in `.env`.
+Prefer the files. A new render copies a file path into `config.json` and never the secret. An inline `ODOO_API_KEY` or `GITHUB_TOKEN` with no file is written at startup to `/var/lib/id42-work/secrets/odoo.key` or `github.token`, mode `0600`, and the child receives that path. Set `GITHUB_TOKEN` or `ID42_WORK_GITHUB_TOKEN_FILE`, not both. If both Odoo values are set, the child uses the file. The operator scripts and the operator UI still read the Compose environment, where an inline Odoo key wins over the file. Leave the flags false and the child env omits them, even if a URL or token is still in `.env`.
 
 ```bash
 ID42_WORK_ODOO_ENABLED=true

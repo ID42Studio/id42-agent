@@ -24,4 +24,11 @@ if [ ! -f "$dir/config.json" ]; then
     exit 1
 fi
 
+# Inline database and connector secrets become mode 0600 files. config.json
+# already holds the paths. This does not write the authority key.
+if ! /app/.venv/bin/python -m id42_agent.materialize; then
+    echo "id42-agent: could not store inline secrets as files." >&2
+    exit 1
+fi
+
 exec /usr/local/bin/entrypoint.sh "$@"

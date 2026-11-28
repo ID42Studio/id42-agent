@@ -1,10 +1,11 @@
-"""Run the operator UI on loopback and forward the published port to it.
+"""Run the operator UI on loopback and forward the operator-network port to it.
 
-``id42-work web serve`` accepts only a loopback bind. Docker's port map
-connects to the container address, not to ``127.0.0.1`` inside the container.
-This process starts the UI on ``127.0.0.1:8768`` and copies bytes from
-``0.0.0.0:8767`` to that listener. Compose publishes 8767 on the host loopback.
-The operator token stays in the environment. It is not a process argument.
+``id42-work web serve`` accepts only a loopback bind. This process starts the
+UI on ``127.0.0.1:8768`` and copies bytes from the address on the operator
+network, port 8767, to that listener. Nothing listens on the store network.
+A second container, attached only to the operator network, publishes 8767 on
+the host loopback. The operator token stays in the environment. It is not a
+process argument.
 """
 
 from __future__ import annotations
@@ -17,9 +18,10 @@ import sys
 import threading
 import time
 
+from id42_agent.operator_net import operator_address
+
 INTERNAL_HOST = "127.0.0.1"
 INTERNAL_PORT = 8768
-LISTEN_HOST = "0.0.0.0"  # noqa: S104 - Docker publishes this port on the host loopback
 LISTEN_PORT = 8767
 _FACTORY = "id42_agent.mcp_host:server"
 
@@ -71,8 +73,8 @@ def _wait_until_listening(process: subprocess.Popen[bytes]) -> None:
     raise SystemExit("id42-agent: operator UI did not listen on 127.0.0.1")
 
 
-def _serve(process: subprocess.Popen[bytes]) -> None:
-    server = socket.create_server((LISTEN_HOST, LISTEN_PORT), reuse_port=False)
+def _serve(process: subprocess.Popen[bytes], listen_host: str) -> None:
+    server = socket.create_server((listen_host, LISTEN_PORT), reuse_port=False)
     server.settimeout(1.0)
 
     def stop(signum: int, _frame: object) -> None:
@@ -116,7 +118,7 @@ def main() -> None:
     process = subprocess.Popen(command)  # noqa: S603 - fixed argv, token stays in the environment
     try:
         _wait_until_listening(process)
-        _serve(process)
+        _serve(process, operator_address())
     finally:
         if process.poll() is None:
             process.terminate()
