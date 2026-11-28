@@ -29,7 +29,7 @@ The agent still decides what it wants to do. ID42 Work governs what is allowed t
 
 ## v0.3 — business connectors
 
-Connectors behind the same MCP boundary, not inside the agent image.
+Odoo and GitHub are installed in the image and stay off until `ID42_WORK_ODOO_ENABLED` or `ID42_WORK_GITHUB_ENABLED`. Further systems of record stay behind the same MCP boundary.
 
 - Systems of record the operator actually uses (mail, calendar, files, internal APIs), each as a separate server or tool set
 - Credentials stay with the connector, not in the agent workspace

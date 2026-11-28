@@ -19,6 +19,8 @@ x-nanobot: &nanobot
     args:
       # Full commit. A branch name is not a pin. Keep in sync with Dockerfile.
       ID42_WORK_REF: ${ID42_WORK_REF:-ae07623aa67c0b5d0535cb58f6a2e2b204736e50}
+      ID42_WORK_ODOO_REF: ${ID42_WORK_ODOO_REF:-3797544d8a3580657548d000110915578efe87c3}
+      ID42_WORK_GITHUB_REF: ${ID42_WORK_GITHUB_REF:-2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3}
   environment:
     TZ: ${TZ:-America/Sao_Paulo}
     NANOBOT_DOCKER_BOOTSTRAP: "1"
@@ -27,6 +29,24 @@ x-nanobot: &nanobot
     # and ID42_WORK_DATABASE_URL. The URL is a secret; scripts must not print it.
     ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
     ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+    # Connectors stay off until the flag is true. Secrets are empty here.
+    # Prefer a mode 0600 file over the inline secret. See docs/id42-work.md.
+    ID42_WORK_ODOO_ENABLED: ${ID42_WORK_ODOO_ENABLED:-false}
+    ODOO_URL: ${ODOO_URL:-}
+    ODOO_DB: ${ODOO_DB:-}
+    ODOO_USER: ${ODOO_USER:-}
+    ODOO_API_KEY: ${ODOO_API_KEY:-}
+    ODOO_API_KEY_FILE: ${ODOO_API_KEY_FILE:-}
+    ODOO_PROTOCOL: ${ODOO_PROTOCOL:-}
+    ODOO_TIMEOUT: ${ODOO_TIMEOUT:-}
+    ID42_WORK_ODOO_READ_MODELS: ${ID42_WORK_ODOO_READ_MODELS:-}
+    ID42_WORK_ODOO_WRITE_MODELS: ${ID42_WORK_ODOO_WRITE_MODELS:-}
+    ID42_WORK_ODOO_READ_FIELDS: ${ID42_WORK_ODOO_READ_FIELDS:-}
+    ID42_WORK_GITHUB_ENABLED: ${ID42_WORK_GITHUB_ENABLED:-false}
+    ID42_WORK_GITHUB_REPOSITORIES: ${ID42_WORK_GITHUB_REPOSITORIES:-}
+    GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ID42_WORK_GITHUB_TOKEN_FILE: ${ID42_WORK_GITHUB_TOKEN_FILE:-}
+    ID42_WORK_GITHUB_OPERATION_LOG: ${ID42_WORK_GITHUB_OPERATION_LOG:-}
   volumes:
     - nanobot-data:/home/nanobot/.nanobot
     # Notes and the authority key for the default factory, plus the SQLite
@@ -186,6 +206,22 @@ services:
       ID42_WORK_AUTHORITY_KEY_PATH: ${ID42_WORK_AUTHORITY_KEY_PATH:-}
       ID42_WORK_WEB_TOKEN: ${ID42_WORK_WEB_TOKEN:-}
       ID42_WORK_WEB_TOKEN_FILE: ${ID42_WORK_WEB_TOKEN_FILE:-}
+      ID42_WORK_ODOO_ENABLED: ${ID42_WORK_ODOO_ENABLED:-false}
+      ODOO_URL: ${ODOO_URL:-}
+      ODOO_DB: ${ODOO_DB:-}
+      ODOO_USER: ${ODOO_USER:-}
+      ODOO_API_KEY: ${ODOO_API_KEY:-}
+      ODOO_API_KEY_FILE: ${ODOO_API_KEY_FILE:-}
+      ODOO_PROTOCOL: ${ODOO_PROTOCOL:-}
+      ODOO_TIMEOUT: ${ODOO_TIMEOUT:-}
+      ID42_WORK_ODOO_READ_MODELS: ${ID42_WORK_ODOO_READ_MODELS:-}
+      ID42_WORK_ODOO_WRITE_MODELS: ${ID42_WORK_ODOO_WRITE_MODELS:-}
+      ID42_WORK_ODOO_READ_FIELDS: ${ID42_WORK_ODOO_READ_FIELDS:-}
+      ID42_WORK_GITHUB_ENABLED: ${ID42_WORK_GITHUB_ENABLED:-false}
+      ID42_WORK_GITHUB_REPOSITORIES: ${ID42_WORK_GITHUB_REPOSITORIES:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      ID42_WORK_GITHUB_TOKEN_FILE: ${ID42_WORK_GITHUB_TOKEN_FILE:-}
+      ID42_WORK_GITHUB_OPERATION_LOG: ${ID42_WORK_GITHUB_OPERATION_LOG:-}
     volumes:
       - id42-work-data:/var/lib/id42-work
       - ./docker/web-entrypoint.sh:/id42/web-entrypoint.sh:ro

@@ -468,6 +468,72 @@ if "ID42_WORK_STORAGE" in sqlite_server["env"] or "ID42_WORK_DATABASE_URL" in sq
 print("postgres storage is passed to the MCP child and is not printed")
 PY
 
+python3 - "$CONFIG_PY" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("id42_config", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+base = {
+    "TZ": "America/Sao_Paulo",
+    "OLLAMA_BASE_URL": "http://host.docker.internal:9/v1",
+    "OLLAMA_MODEL": "smoke-model",
+    "TELEGRAM_ENABLED": "false",
+    "NANOBOT_WEB_TOKEN": "smoke-web-token-do-not-leak",
+    "ID42_WORK_ENABLED": "false",
+    "ODOO_URL": "http://odoo.internal",
+    "GITHUB_TOKEN": "smoke-github-token-do-not-leak",
+}
+off = mod.build_config(base)
+assert "mcpServers" not in off["tools"] or "id42-work" not in off["tools"].get("mcpServers", {})
+summary = {}
+# Flags off must not require credentials, and a later enabled render must not
+# copy a GitHub token when a file is configured.
+enabled = dict(base)
+enabled["ID42_WORK_ENABLED"] = "true"
+enabled["ID42_WORK_ODOO_ENABLED"] = "true"
+enabled["ODOO_DB"] = "probe"
+enabled["ODOO_USER"] = "probe"
+enabled["ODOO_API_KEY_FILE"] = "/var/lib/id42-work/odoo.key"
+enabled["ID42_WORK_ODOO_READ_MODELS"] = "res.partner"
+enabled["ID42_WORK_ODOO_WRITE_MODELS"] = "res.partner"
+enabled["ID42_WORK_GITHUB_ENABLED"] = "true"
+enabled["ID42_WORK_GITHUB_REPOSITORIES"] = "acme/widgets"
+enabled["ID42_WORK_GITHUB_TOKEN_FILE"] = "/var/lib/id42-work/github.token"
+del enabled["GITHUB_TOKEN"]
+doc = mod.build_config(enabled)
+server_env = doc["tools"]["mcpServers"]["id42-work"]["env"]
+assert server_env["ID42_WORK_ODOO_ENABLED"] == "true"
+assert server_env["ID42_WORK_GITHUB_ENABLED"] == "true"
+assert server_env["ODOO_API_KEY_FILE"] == "/var/lib/id42-work/odoo.key"
+assert "ODOO_API_KEY" not in server_env
+assert "GITHUB_TOKEN" not in server_env
+assert "odoo.search" not in json.dumps(server_env)
+both = dict(enabled)
+both["GITHUB_TOKEN"] = "smoke-github-token-do-not-leak"
+try:
+    mod.build_config(both)
+except mod.ConfigError as exc:
+    if "not both" not in str(exc):
+        raise SystemExit(f"unexpected connector error: {exc}")
+else:
+    raise SystemExit("github token and token file were both accepted")
+missing = dict(enabled)
+del missing["ODOO_URL"]
+try:
+    mod.build_config(missing)
+except mod.ConfigError as exc:
+    if "ODOO_URL" not in str(exc):
+        raise SystemExit(f"unexpected odoo error: {exc}")
+else:
+    raise SystemExit("odoo without a URL was accepted")
+if "smoke-github-token-do-not-leak" in json.dumps(doc):
+    raise SystemExit("rendered config contained the github token")
+print("connector settings stay out until enabled and do not print secrets")
+PY
+
 echo "== compose config =="
 COMPOSE_PROJECT_NAME=$PROJECT docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" config >/dev/null
 
@@ -521,6 +587,21 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
 sed -i 's/\r$//' "$WORKDIR/mcp-probe"
 grep -q "mcp-stdio-ok" "$WORKDIR/mcp-probe"
 grep -qx "works=echo,note,note.list" "$WORKDIR/mcp-probe"
+
+echo "== connector registration =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+  --entrypoint /opt/id42-work/venv/bin/python \
+  -e PYTHONPATH=/opt/id42-agent \
+  nanobot-gateway -m id42_agent.connector_probe | tee "$WORKDIR/connector-probe.out"
+sed -i 's/\r$//' "$WORKDIR/connector-probe.out"
+grep -q "connector-probe-ok" "$WORKDIR/connector-probe.out" \
+  || id42_die "connector probe did not pass"
+if grep -q "probe-token-not-secret" "$WORKDIR/connector-probe.out" \
+  || grep -q "odoo-probe-key" "$WORKDIR/connector-probe.out"
+then
+  id42_die "connector probe printed a credential"
+fi
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
@@ -1559,6 +1640,14 @@ fi
 if ! grep -q "OK: id42-work pin is ae07623aa67c0b5d0535cb58f6a2e2b204736e50" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work pin"
+fi
+if ! grep -q "OK: id42-work-odoo pin is 3797544d8a3580657548d000110915578efe87c3" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work-odoo pin"
+fi
+if ! grep -q "OK: id42-work-github pin is 2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work-github pin"
 fi
 if ! grep -q "OK: authority key file is mode 0600" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2

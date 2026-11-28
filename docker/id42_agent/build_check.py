@@ -9,6 +9,7 @@ import asyncio
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -207,6 +208,26 @@ def main() -> None:
         raise SystemExit(f"unreadable file reconciled as {unreadable.verdict}")
     host.DEFAULT_AUTHORITY_KEY.unlink(missing_ok=True)
     Path(str(host.DEFAULT_AUTHORITY_KEY) + ".lock").unlink(missing_ok=True)
+    _check_connectors()
+
+
+def _check_connectors() -> None:
+    """Run the connector probe in a child so its socket block stays there."""
+    env = os.environ.copy()
+    env["ID42_WORK_STORAGE"] = "sqlite"
+    env.pop("ID42_WORK_DATABASE_URL", None)
+    env.pop("ID42_WORK_ODOO_ENABLED", None)
+    env.pop("ID42_WORK_GITHUB_ENABLED", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "id42_agent.connector_probe"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0 or "connector-probe-ok" not in completed.stdout:
+        detail = (completed.stderr or completed.stdout or "connector probe failed").strip()
+        raise SystemExit(detail[-1000:])
 
 
 if __name__ == "__main__":

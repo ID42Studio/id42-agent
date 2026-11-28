@@ -35,6 +35,22 @@ ENV_KEYS = (
     "ID42_WORK_DATABASE_URL",
     "ID42_WORK_WEB_TOKEN",
     "ID42_WORK_WEB_TOKEN_FILE",
+    "ID42_WORK_ODOO_ENABLED",
+    "ODOO_URL",
+    "ODOO_DB",
+    "ODOO_USER",
+    "ODOO_API_KEY",
+    "ODOO_API_KEY_FILE",
+    "ODOO_PROTOCOL",
+    "ODOO_TIMEOUT",
+    "ID42_WORK_ODOO_READ_MODELS",
+    "ID42_WORK_ODOO_WRITE_MODELS",
+    "ID42_WORK_ODOO_READ_FIELDS",
+    "ID42_WORK_GITHUB_ENABLED",
+    "ID42_WORK_GITHUB_REPOSITORIES",
+    "GITHUB_TOKEN",
+    "ID42_WORK_GITHUB_TOKEN_FILE",
+    "ID42_WORK_GITHUB_OPERATION_LOG",
 )
 
 # Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
@@ -54,6 +70,9 @@ _STORAGE_POSTGRES = "postgres"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
+_MODEL_RE = re.compile(r"^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)*$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_FIELD_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DATA_CONFIG = Path("/home/nanobot/.nanobot/config.json")
 _WORKSPACE = Path("/home/nanobot/.nanobot/workspace")
@@ -291,6 +310,206 @@ def _work_pythonpath(raw: str) -> str:
     return ":".join(cleaned)
 
 
+def connector_errors(env: Mapping[str, str]) -> list[str]:
+    """Reject incomplete connector settings. The messages do not include secrets."""
+    errors: list[str] = []
+    try:
+        odoo = _parse_bool("ID42_WORK_ODOO_ENABLED", env.get("ID42_WORK_ODOO_ENABLED", "") or "false")
+        github = _parse_bool(
+            "ID42_WORK_GITHUB_ENABLED",
+            env.get("ID42_WORK_GITHUB_ENABLED", "") or "false",
+        )
+    except ConfigError as exc:
+        return [str(exc)]
+    if odoo:
+        errors.extend(_odoo_errors(env))
+    if github:
+        errors.extend(_github_errors(env))
+    return errors
+
+
+def _connector_server_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Env entries the stdio child needs when a connector is on."""
+    copied: dict[str, str] = {}
+    if _parse_bool("ID42_WORK_ODOO_ENABLED", env.get("ID42_WORK_ODOO_ENABLED", "") or "false"):
+        copied["ID42_WORK_ODOO_ENABLED"] = "true"
+        for name in (
+            "ODOO_URL",
+            "ODOO_DB",
+            "ODOO_USER",
+            "ODOO_API_KEY",
+            "ODOO_API_KEY_FILE",
+            "ODOO_PROTOCOL",
+            "ODOO_TIMEOUT",
+            "ID42_WORK_ODOO_READ_MODELS",
+            "ID42_WORK_ODOO_WRITE_MODELS",
+            "ID42_WORK_ODOO_READ_FIELDS",
+        ):
+            value = env.get(name, "").strip()
+            if value:
+                copied[name] = value
+    if _parse_bool("ID42_WORK_GITHUB_ENABLED", env.get("ID42_WORK_GITHUB_ENABLED", "") or "false"):
+        copied["ID42_WORK_GITHUB_ENABLED"] = "true"
+        for name in (
+            "ID42_WORK_GITHUB_REPOSITORIES",
+            "ID42_WORK_GITHUB_TOKEN_FILE",
+            "ID42_WORK_GITHUB_OPERATION_LOG",
+        ):
+            value = env.get(name, "").strip()
+            if value:
+                copied[name] = value
+        if not env.get("ID42_WORK_GITHUB_TOKEN_FILE", "").strip():
+            token = env.get("GITHUB_TOKEN", "").strip()
+            if token:
+                copied["GITHUB_TOKEN"] = token
+    return copied
+
+
+def _odoo_errors(env: Mapping[str, str]) -> list[str]:
+    errors: list[str] = []
+    url = env.get("ODOO_URL", "").strip()
+    if not url or any(char.isspace() for char in url):
+        errors.append("ODOO_URL is required when Odoo is enabled")
+    else:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            errors.append("ODOO_URL must be an http or https URL")
+        elif parsed.username or parsed.password or parsed.query or parsed.fragment:
+            errors.append("ODOO_URL must not embed credentials, a query, or a fragment")
+    if not env.get("ODOO_DB", "").strip():
+        errors.append("ODOO_DB is required when Odoo is enabled")
+    if not env.get("ODOO_USER", "").strip():
+        errors.append("ODOO_USER is required when Odoo is enabled")
+    key = env.get("ODOO_API_KEY", "").strip()
+    key_file = env.get("ODOO_API_KEY_FILE", "").strip()
+    if key and _secret_error(key):
+        errors.append("ODOO_API_KEY must be one line")
+    if key_file:
+        path_error = _secret_file_error(key_file, "ODOO_API_KEY_FILE")
+        if path_error:
+            errors.append(path_error)
+    if not key and not key_file:
+        errors.append("ODOO_API_KEY or ODOO_API_KEY_FILE is required when Odoo is enabled")
+    protocol = env.get("ODOO_PROTOCOL", "").strip().lower()
+    if protocol and protocol not in {"jsonrpc", "xmlrpc"}:
+        errors.append("ODOO_PROTOCOL must be jsonrpc or xmlrpc")
+    timeout = env.get("ODOO_TIMEOUT", "").strip()
+    if timeout:
+        try:
+            number = float(timeout)
+        except ValueError:
+            number = 0
+        if number < 1 or number > 300:
+            errors.append("ODOO_TIMEOUT must be between 1 and 300 seconds")
+    read_models = _name_list(
+        env.get("ID42_WORK_ODOO_READ_MODELS", ""),
+        "ID42_WORK_ODOO_READ_MODELS",
+        _MODEL_RE,
+        errors,
+    )
+    if not read_models and not any("ID42_WORK_ODOO_READ_MODELS" in item for item in errors):
+        errors.append("ID42_WORK_ODOO_READ_MODELS is required when Odoo is enabled")
+    write_models = _name_list(
+        env.get("ID42_WORK_ODOO_WRITE_MODELS", ""),
+        "ID42_WORK_ODOO_WRITE_MODELS",
+        _MODEL_RE,
+        errors,
+    )
+    if any(model not in read_models for model in write_models):
+        errors.append("ID42_WORK_ODOO_WRITE_MODELS must also be listed in ID42_WORK_ODOO_READ_MODELS")
+    _field_list_errors(env.get("ID42_WORK_ODOO_READ_FIELDS", ""), read_models, errors)
+    return errors
+
+
+def _github_errors(env: Mapping[str, str]) -> list[str]:
+    errors: list[str] = []
+    repos = _name_list(
+        env.get("ID42_WORK_GITHUB_REPOSITORIES", ""),
+        "ID42_WORK_GITHUB_REPOSITORIES",
+        _REPO_RE,
+        errors,
+    )
+    if not repos and not any("ID42_WORK_GITHUB_REPOSITORIES" in item for item in errors):
+        errors.append("ID42_WORK_GITHUB_REPOSITORIES is required when GitHub is enabled")
+    token = env.get("GITHUB_TOKEN", "").strip()
+    token_file = env.get("ID42_WORK_GITHUB_TOKEN_FILE", "").strip()
+    if token and token_file:
+        errors.append("set GITHUB_TOKEN or ID42_WORK_GITHUB_TOKEN_FILE, not both")
+    if token and _secret_error(token):
+        errors.append("GITHUB_TOKEN must be one line")
+    if token_file:
+        path_error = _secret_file_error(token_file, "ID42_WORK_GITHUB_TOKEN_FILE")
+        if path_error:
+            errors.append(path_error)
+    if not token and not token_file:
+        errors.append("GITHUB_TOKEN or ID42_WORK_GITHUB_TOKEN_FILE is required when GitHub is enabled")
+    log_path = env.get("ID42_WORK_GITHUB_OPERATION_LOG", "").strip()
+    if log_path:
+        path_error = _secret_file_error(log_path, "ID42_WORK_GITHUB_OPERATION_LOG")
+        if path_error:
+            errors.append(path_error)
+    return errors
+
+
+def _secret_error(value: str) -> bool:
+    return any(char.isspace() for char in value) or len(value) > 4096
+
+
+def _secret_file_error(value: str, label: str) -> str | None:
+    path = Path(value)
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        return f"{label} must be an absolute file path"
+    for root in (Path("/home"), Path("/root")):
+        if path == root or root in path.parents:
+            return f"{label} must not live under /home or /root"
+    return None
+
+
+def _name_list(raw: str, label: str, pattern: re.Pattern[str], errors: list[str]) -> list[str]:
+    if not raw.strip():
+        return []
+    items: list[str] = []
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            errors.append(f"{label} has an empty entry")
+            return items
+        if pattern.fullmatch(item) is None:
+            errors.append(f"{label} has an entry that is not allowed")
+            return items
+        if item in items:
+            errors.append(f"{label} lists a name more than once")
+            return items
+        items.append(item)
+    return items
+
+
+def _field_list_errors(raw: str, read_models: list[str], errors: list[str]) -> None:
+    text = raw.strip()
+    if not text:
+        return
+    seen: set[str] = set()
+    for part in text.split(";"):
+        model, separator, fields = part.partition(":")
+        model = model.strip()
+        if not separator or not model or not fields.strip():
+            errors.append("ID42_WORK_ODOO_READ_FIELDS must be model:field,field;model:field")
+            return
+        if model not in read_models:
+            errors.append(
+                "ID42_WORK_ODOO_READ_FIELDS names a model that is not in ID42_WORK_ODOO_READ_MODELS"
+            )
+            return
+        if model in seen:
+            errors.append("ID42_WORK_ODOO_READ_FIELDS lists a model more than once")
+            return
+        seen.add(model)
+        names = _name_list(fields, "ID42_WORK_ODOO_READ_FIELDS", _FIELD_RE, errors)
+        if "name" not in names:
+            errors.append("ID42_WORK_ODOO_READ_FIELDS must include name for each listed model")
+            return
+
+
 def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     """Stdio MCP server block, or None when ID42 Work is left off."""
     enabled = _parse_bool("ID42_WORK_ENABLED", env["ID42_WORK_ENABLED"] or "false")
@@ -318,6 +537,7 @@ def _work_server(env: dict[str, str]) -> dict[str, object] | None:
     if storage == _STORAGE_POSTGRES:
         server_env[_STORAGE_ENV] = _STORAGE_POSTGRES
         server_env[_DATABASE_ENV] = database_url
+    server_env.update(_connector_server_env(env))
     server: dict[str, object] = {
         "command": "id42-work",
         "args": ["mcp", "serve", "--factory", _work_factory(factory_raw)],
@@ -390,6 +610,8 @@ def mcp_server_errors(server: object) -> list[str]:
         string_env = {key: value for key, value in extra_env.items() if isinstance(value, str)}
         for item in _mcp_storage_errors(string_env):
             errors.append(f"{label}.env: {item}")
+        for item in connector_errors(string_env):
+            errors.append(f"{label}.env: {item}")
     return errors
 
 
@@ -424,6 +646,9 @@ def build_config(env: dict[str, str]) -> dict[str, object]:
         raise ConfigError("NANOBOT_WEB_TOKEN is empty; run ensure-token first")
     if any(char.isspace() for char in web_token):
         raise ConfigError("NANOBOT_WEB_TOKEN cannot contain whitespace")
+    connector_problems = connector_errors(picked)
+    if connector_problems:
+        raise ConfigError(connector_problems[0])
 
     telegram_enabled = _parse_bool("TELEGRAM_ENABLED", picked["TELEGRAM_ENABLED"] or "false")
     channels: dict[str, object] = {
@@ -715,6 +940,15 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             "id42_work_database_url_set": bool(picked["ID42_WORK_DATABASE_URL"].strip()),
             "id42_work_web_token_set": bool(picked["ID42_WORK_WEB_TOKEN"].strip()),
             "ID42_WORK_WEB_TOKEN_FILE": picked["ID42_WORK_WEB_TOKEN_FILE"].strip(),
+            "ID42_WORK_ODOO_ENABLED": picked["ID42_WORK_ODOO_ENABLED"] or "false",
+            "odoo_api_key_set": bool(picked["ODOO_API_KEY"].strip() or picked["ODOO_API_KEY_FILE"].strip()),
+            "ID42_WORK_ODOO_READ_MODELS": picked["ID42_WORK_ODOO_READ_MODELS"].strip(),
+            "ID42_WORK_ODOO_WRITE_MODELS": picked["ID42_WORK_ODOO_WRITE_MODELS"].strip(),
+            "ID42_WORK_GITHUB_ENABLED": picked["ID42_WORK_GITHUB_ENABLED"] or "false",
+            "github_token_set": bool(
+                picked["GITHUB_TOKEN"].strip() or picked["ID42_WORK_GITHUB_TOKEN_FILE"].strip()
+            ),
+            "ID42_WORK_GITHUB_REPOSITORIES": picked["ID42_WORK_GITHUB_REPOSITORIES"].strip(),
         }
     if config_path is not None and config_path.is_file():
         document = _load_json(config_path)

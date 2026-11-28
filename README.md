@@ -33,6 +33,7 @@ nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Ap
 - Optional `ollama` service under the `ollama` profile
 - Optional Postgres service under the `postgres` profile, used only when `ID42_WORK_STORAGE=postgres`
 - Optional operator UI under the `id42-work-web` profile, on `127.0.0.1:8767`, for approvals and reconciliation. It uses the same store and authority key. Set `ID42_WORK_WEB_TOKEN` before starting it. See [ID42 Work](docs/id42-work.md)
+- Optional Odoo and GitHub connectors, installed but off until `ID42_WORK_ODOO_ENABLED` or `ID42_WORK_GITHUB_ENABLED`. Allow-lists are required. GitHub work cannot merge, close, delete, or push
 
 Not in this phase: backup/restore or a public API service. Upstream `v0.4.2` removed `nanobot serve` and has no `doctor` command. `scripts/doctor.sh` is this distribution's check, not a nanobot subcommand.
 

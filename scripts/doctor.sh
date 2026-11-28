@@ -237,15 +237,30 @@ if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
   nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$probe_out"
 then
   sed -i 's/\r$//' "$probe_out"
-  if grep -qx 'works=echo,note,note.list' "$probe_out"; then
-    good "id42-work lists echo, note, and note.list"
+  expected_works=$(PYTHONPATH="$ROOT/docker:$ROOT/scripts/lib" python3 - "$ENV_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+from config import load_env_file
+from id42_agent.connectors import configured_work_ids
+
+print(",".join(configured_work_ids(load_env_file(Path(sys.argv[1])))))
+PY
+)
+  expected_pages=$(python3 -c 'import sys; print(len([item for item in sys.argv[1].split(",") if item]))' "$expected_works")
+  if grep -qx "works=${expected_works}" "$probe_out"; then
+    if [[ "$expected_works" == "echo,note,note.list" ]]; then
+      good "id42-work lists echo, note, and note.list"
+    else
+      good "id42-work lists the configured works"
+    fi
   else
-    bad "id42-work did not list echo, note, and note.list"
+    bad "id42-work did not list ${expected_works}"
   fi
-  if grep -qx 'work_pages=3' "$probe_out"; then
+  if grep -qx "work_pages=${expected_pages}" "$probe_out"; then
     good "id42-work list_works is paged"
   else
-    bad "id42-work list_works did not page the three works"
+    bad "id42-work list_works did not page every registered work"
   fi
   good "id42-work MCP server answered on stdio"
 else
@@ -337,6 +352,25 @@ if [[ -n "$container_id" ]]; then
     bad "id42-work pin is ${pin:-missing}, expected $expected_pin"
   else
     good "id42-work pin is $pin"
+  fi
+  # Keep in sync with the Dockerfile defaults.
+  expected_odoo_pin=3797544d8a3580657548d000110915578efe87c3
+  expected_github_pin=2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3
+  odoo_pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_ODOO_REF' 2>/dev/null || true)
+  github_pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_GITHUB_REF' 2>/dev/null || true)
+  odoo_pin=${odoo_pin//$'\r'/}
+  odoo_pin=${odoo_pin//$'\n'/}
+  github_pin=${github_pin//$'\r'/}
+  github_pin=${github_pin//$'\n'/}
+  if [[ "$odoo_pin" != "$expected_odoo_pin" ]]; then
+    bad "id42-work-odoo pin is ${odoo_pin:-missing}, expected $expected_odoo_pin"
+  else
+    good "id42-work-odoo pin is $odoo_pin"
+  fi
+  if [[ "$github_pin" != "$expected_github_pin" ]]; then
+    bad "id42-work-github pin is ${github_pin:-missing}, expected $expected_github_pin"
+  else
+    good "id42-work-github pin is $github_pin"
   fi
 
   help_out=$(mktemp)

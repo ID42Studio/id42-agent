@@ -73,7 +73,9 @@ Put a long random value in `.env` as `ID42_WORK_WEB_TOKEN`, or point `ID42_WORK_
 docker compose --profile id42-work-web up -d id42-work-web
 ```
 
-Open `http://127.0.0.1:8767/`. Sign in with that token and actor id `id42-operator`. Approvals are on the home page. Uncertain calls are on `/reconcile`. Approve, reject, applied, not-applied, and abandon do the same work as `scripts/work-approve.sh` and `scripts/work-reconcile.sh`. From another computer, use `ssh -L 8767:127.0.0.1:8767 user@host` and open the same URL locally. See [id42-work.md](id42-work.md).
+Open `http://127.0.0.1:8767/`. Sign in with that token and actor id `id42-operator`. Approvals are on the home page. Uncertain calls are on `/reconcile`. Approve, reject, applied, not-applied, and abandon do the same work as `scripts/work-approve.sh` and `scripts/work-reconcile.sh`. From another computer, use `ssh -L 8767:127.0.0.1:8767 user@host` and open the same URL locally.
+
+Odoo and GitHub are installed and off. Set `ID42_WORK_ODOO_ENABLED` or `ID42_WORK_GITHUB_ENABLED`, an allow-list, and a mode `0600` credential file before the first init if the MCP server should see them. See [id42-work.md](id42-work.md).
 
 ## Check
 

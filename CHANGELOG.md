@@ -6,6 +6,7 @@
 
 - id42-work is pinned at `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`. The default factory passes `session_actor` so stdio keeps one sealed actor for the process, and HTTP sessions present a credential the authority verifies. `list_works` and `list_executions` are paged.
 - Optional operator UI. Profile `id42-work-web` runs `id42-work web serve` on the same store and authority key. The host port is `127.0.0.1:8767`. The token comes from `ID42_WORK_WEB_TOKEN` or `ID42_WORK_WEB_TOKEN_FILE`.
+- Optional Odoo and GitHub connectors in the id42-work virtualenv, pinned by `ID42_WORK_ODOO_REF` and `ID42_WORK_GITHUB_REF`. They register only when `ID42_WORK_ODOO_ENABLED` or `ID42_WORK_GITHUB_ENABLED` is true. The default works stay `echo`, `note`, and `note.list`.
 - Optional Postgres storage for the default id42-work factory. SQLite remains the default.
   `ID42_WORK_STORAGE=postgres` and `ID42_WORK_DATABASE_URL` select `PostgresStorage`.
   The `postgres` Compose profile runs Postgres from credentials in `.env` and publishes

@@ -13,18 +13,32 @@ COPY docker/id42_agent /opt/id42-agent/id42_agent
 ENV PYTHONPATH=/opt/id42-agent
 ENV ID42_WORK_VENV=/opt/id42-work/venv
 
-# Full commit of ID42Studio/id42-work. Override with --build-arg ID42_WORK_REF.
+# Full commits. Override with --build-arg. A branch name is not a pin.
 ARG ID42_WORK_REF=ae07623aa67c0b5d0535cb58f6a2e2b204736e50
+ARG ID42_WORK_ODOO_REF=3797544d8a3580657548d000110915578efe87c3
+ARG ID42_WORK_GITHUB_REF=2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3
 
 RUN set -eu; \
-    case "$ID42_WORK_REF" in \
-      ""|-*|*[!A-Za-z0-9._-]*) echo "id42-agent: invalid ID42_WORK_REF" >&2; exit 1 ;; \
-    esac; \
+    valid_ref() { \
+      case "$1" in \
+        ""|-*|*[!A-Za-z0-9._-]*) echo "id42-agent: invalid $2" >&2; exit 1 ;; \
+      esac; \
+    }; \
+    valid_ref "$ID42_WORK_REF" ID42_WORK_REF; \
+    valid_ref "$ID42_WORK_ODOO_REF" ID42_WORK_ODOO_REF; \
+    valid_ref "$ID42_WORK_GITHUB_REF" ID42_WORK_GITHUB_REF; \
     uv venv "$ID42_WORK_VENV"; \
     uv pip install --python "$ID42_WORK_VENV/bin/python" --no-cache \
       "id42-work[mcp,postgres,web] @ git+https://github.com/ID42Studio/id42-work.git@${ID42_WORK_REF}"; \
+    uv pip install --python "$ID42_WORK_VENV/bin/python" --no-cache --no-deps \
+      "id42-work-odoo @ git+https://github.com/ID42Studio/id42-work-odoo.git@${ID42_WORK_ODOO_REF}" \
+      "id42-work-github @ git+https://github.com/ID42Studio/id42-work-github.git@${ID42_WORK_GITHUB_REF}"; \
+    uv pip install --python "$ID42_WORK_VENV/bin/python" --no-cache 'httpx>=0.28,<1'; \
+    "$ID42_WORK_VENV/bin/python" -c 'import httpx, id42_work_github, id42_work_odoo; from importlib.metadata import version; assert version("id42-work")=="0.1.0rc2"'; \
     ln -sfn "$ID42_WORK_VENV/bin/id42-work" /usr/local/bin/id42-work; \
     printf '%s\n' "$ID42_WORK_REF" > /opt/id42-agent/ID42_WORK_REF; \
+    printf '%s\n' "$ID42_WORK_ODOO_REF" > /opt/id42-agent/ID42_WORK_ODOO_REF; \
+    printf '%s\n' "$ID42_WORK_GITHUB_REF" > /opt/id42-agent/ID42_WORK_GITHUB_REF; \
     mkdir -p /var/lib/id42-work; \
     chmod 700 /var/lib/id42-work; \
     chown -R nanobot:nanobot /opt/id42-work /opt/id42-agent /var/lib/id42-work; \
