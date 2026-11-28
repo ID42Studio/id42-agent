@@ -1,7 +1,7 @@
 # id42-agent.
 # Runtime: HKUDS/nanobot v0.4.2 at 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65.
 # There is no official published image. Compose builds the upstream Dockerfile,
-# then Dockerfile installs id42-work[mcp,postgres] into a separate virtualenv.
+# then Dockerfile installs id42-work[mcp,postgres,web] into a separate virtualenv.
 # nanobot is MIT licensed. id42-work and this repository's own files are Apache-2.0.
 # See NOTICE.
 
@@ -161,6 +161,48 @@ services:
       resources:
         limits:
           cpus: "1.0"
+          memory: 512M
+
+  # Opt-in operator UI for approvals and reconciliation. Same image, same
+  # factory, same id42-work-data volume and authority key as the gateway.
+  # id42-work binds 127.0.0.1. The entrypoint forwards the published port to
+  # that listener. The host map stays on loopback.
+  # Enable with: docker compose --profile id42-work-web up -d id42-work-web
+  id42-work-web:
+    <<: *nanobot
+    profiles:
+      - id42-work-web
+    entrypoint: ["/bin/sh", "/id42/web-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    # Replaces the gateway environment. The operator token stays on this
+    # service. The gateway process does not receive it.
+    environment:
+      ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
+      ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+      ID42_WORK_AUTHORITY_KEY_PATH: ${ID42_WORK_AUTHORITY_KEY_PATH:-}
+      ID42_WORK_WEB_TOKEN: ${ID42_WORK_WEB_TOKEN:-}
+      ID42_WORK_WEB_TOKEN_FILE: ${ID42_WORK_WEB_TOKEN_FILE:-}
+    volumes:
+      - id42-work-data:/var/lib/id42-work
+      - ./docker/web-entrypoint.sh:/id42/web-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:${ID42_WORK_WEB_PUBLISH_PORT:-8767}:8767"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8767/login"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
           memory: 512M
 
 volumes:

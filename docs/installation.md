@@ -63,6 +63,18 @@ ssh -L 8765:127.0.0.1:8765 -L 18790:127.0.0.1:18790 user@host
 
 Then open `http://127.0.0.1:8765` on your computer.
 
+## Open the operator UI
+
+This is the ID42 Work page for approvals and reconciliation. It is not the nanobot WebUI. Leave it off until you need it.
+
+Put a long random value in `.env` as `ID42_WORK_WEB_TOKEN`, or point `ID42_WORK_WEB_TOKEN_FILE` at a mode `0600` file inside the container. Then:
+
+```bash
+docker compose --profile id42-work-web up -d id42-work-web
+```
+
+Open `http://127.0.0.1:8767/`. Sign in with that token and actor id `id42-operator`. Approvals are on the home page. Uncertain calls are on `/reconcile`. Approve, reject, applied, not-applied, and abandon do the same work as `scripts/work-approve.sh` and `scripts/work-reconcile.sh`. From another computer, use `ssh -L 8767:127.0.0.1:8767 user@host` and open the same URL locally. See [id42-work.md](id42-work.md).
+
 ## Check
 
 ```bash
@@ -71,7 +83,7 @@ make doctor
 make status
 ```
 
-`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that the ID42 Work store is writable and mounted, which storage backend is active, and that backend's connectivity. SQLite opens the file on the volume. Postgres must answer, and its container must not publish a host port. It never prints the database URL. It checks that `id42-work mcp serve` answers on stdio and lists `echo`, `note`, and `note.list`, that the image pin matches `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`, that the authority key file is absent or mode `0600`, that `id42-work approvals` and `id42-work reconcile` are on `PATH`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token, the WebUI token, or the authority key.
+`make doctor` checks Docker, `.env`, loopback port bindings, `/health`, that the ID42 Work store is writable and mounted, which storage backend is active, and that backend's connectivity. SQLite opens the file on the volume. Postgres must answer, and its container must not publish a host port. It never prints the database URL. It checks that `id42-work mcp serve` answers on stdio and lists `echo`, `note`, and `note.list`, that the image pin matches `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`, that the authority key file is absent or mode `0600`, that `id42-work approvals` and `id42-work reconcile` are on `PATH`, Ollama from inside the gateway container, and (only when Telegram is enabled) `getMe` plus the allowlist. It never prints the bot token, the WebUI token, the operator UI token, or the authority key.
 
 ## Stop
 

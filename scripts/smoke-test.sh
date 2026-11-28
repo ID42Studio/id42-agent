@@ -23,7 +23,8 @@ cleanup() {
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
-      docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" down -v --remove-orphans \
+      docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+      down -v --remove-orphans \
       >/dev/null 2>&1 || true
   fi
   rm -rf "$WORKDIR"
@@ -698,6 +699,140 @@ sed -i 's/\r$//' "$WORKDIR/approve-list.out"
 approve_approval=$(approval_id_for "$WORKDIR/approve-list.out" "$approve_exec") \
   || id42_die "approvals list did not include the waiting note"
 require_pending_line "$WORKDIR/approve-list.out" "$approve_exec"
+
+echo "== id42-work operator UI lists the pending approval =="
+web_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+web_token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+printf 'ID42_WORK_WEB_TOKEN=%s\nID42_WORK_WEB_PUBLISH_PORT=%s\n' "$web_token" "$web_port" >>"$ENV_FILE"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+  up -d id42-work-web
+web_id=""
+web_health=""
+for _ in $(seq 1 40); do
+  web_id=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+    ps -q id42-work-web || true)
+  web_health=$(docker inspect --format '{{.State.Health.Status}}' "$web_id" 2>/dev/null || true)
+  if [[ "$web_health" == "healthy" ]]; then
+    break
+  fi
+  sleep 2
+done
+capture_web_logs() {
+  ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+    logs id42-work-web >"$WORKDIR/web.log" || true
+  if grep -q "$web_token" "$WORKDIR/web.log"; then
+    id42_die "operator UI logs contained the token"
+  fi
+}
+if [[ "$web_health" != "healthy" ]]; then
+  capture_web_logs
+  tail -n 80 "$WORKDIR/web.log" >&2 || true
+  id42_die "operator UI did not become healthy"
+fi
+web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
+[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1"
+ID42_WORK_WEB_TOKEN=$web_token ID42_WORK_WEB_URL="http://127.0.0.1:${web_port}" \
+  python3 - "$WORKDIR/web-ui.out" <<'PY'
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+out_path, = sys.argv[1:]
+base = os.environ["ID42_WORK_WEB_URL"].rstrip("/")
+token = os.environ["ID42_WORK_WEB_TOKEN"]
+origin = base
+
+
+class Response:
+    def __init__(self, status, headers, body):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+
+def request(method, path, *, headers=None, data=None):
+    req = urllib.request.Request(base + path, data=data, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            return Response(response.status, response.headers, response.read())
+    except urllib.error.HTTPError as exc:
+        return Response(exc.code, exc.headers, exc.read())
+
+
+anonymous = request("GET", "/")
+if anonymous.status not in {302, 303, 307, 401}:
+    raise SystemExit(f"anonymous home status {anonymous.status}")
+login = request("GET", "/login")
+if login.status != 200 or b"Sign in" not in login.body:
+    raise SystemExit(f"login page status {login.status}")
+sheet = request("GET", "/static/operator.css")
+if sheet.status != 200 or b"text/css" not in sheet.headers.get("Content-Type", "").encode():
+    raise SystemExit(f"stylesheet status {sheet.status}")
+match = re.search(br'name="csrf" value="([^"]+)"', login.body)
+if match is None:
+    raise SystemExit("login page had no csrf field")
+csrf = match.group(1).decode("ascii")
+cookie = login.headers.get("Set-Cookie", "")
+if "id42_csrf=" not in cookie:
+    raise SystemExit("login page set no csrf cookie")
+form = urllib.parse.urlencode(
+    {"csrf": csrf, "token": token, "actor_id": "id42-operator", "credential": ""}
+).encode("ascii")
+signed = request(
+    "POST",
+    "/login",
+    data=form,
+    headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": origin,
+        "Cookie": cookie.split(";", 1)[0],
+    },
+)
+if signed.status not in {302, 303}:
+    raise SystemExit(f"sign-in status {signed.status}")
+session = ""
+for value in signed.headers.get_all("Set-Cookie") or []:
+    if value.startswith("id42_session="):
+        session = value.split(";", 1)[0]
+if not session:
+    raise SystemExit("sign-in set no session cookie")
+home = request("GET", "/", headers={"Cookie": session})
+text = home.body.decode("utf-8", errors="replace")
+if home.status != 200 or ">note<" not in text or "PENDING" not in text:
+    raise SystemExit(f"home did not list the pending note (status {home.status})")
+reconcile = request("GET", "/reconcile", headers={"Cookie": session})
+if reconcile.status != 200 or b"Reconciliation" not in reconcile.body:
+    raise SystemExit(f"reconcile page status {reconcile.status}")
+report = "\n".join(
+    [
+        f"anonymous={anonymous.status}",
+        "login=200",
+        f"sign_in={signed.status}",
+        "home=pending-note",
+        "reconcile=200",
+        "",
+    ]
+)
+if token in report or token in text:
+    raise SystemExit("operator UI page contained the token")
+open(out_path, "w", encoding="utf-8").write(report)
+print("operator UI listed the pending note")
+PY
+if grep -q "$web_token" "$WORKDIR/web-ui.out"; then
+  id42_die "operator UI check output contained the token"
+fi
+grep -q "home=pending-note" "$WORKDIR/web-ui.out"
+capture_web_logs
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+  stop id42-work-web >/dev/null
+echo "OK operator UI serves on loopback and lists the pending approval"
 
 approvals_cmd approve "$approve_approval" \
   --factory id42_agent.mcp_host:server \
@@ -1432,6 +1567,14 @@ fi
 if ! grep -q "OK: id42-work approvals command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work approvals command"
+fi
+if ! grep -q "OK: id42-work web command is available" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work web command"
+fi
+if ! grep -q "OK: id42-work operator UI is not running" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the operator UI was stopped"
 fi
 if ! grep -q "OK: id42-work reconcile command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2

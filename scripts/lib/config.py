@@ -33,6 +33,8 @@ ENV_KEYS = (
     "ID42_WORK_AUTHORITY_KEY_PATH",
     "ID42_WORK_STORAGE",
     "ID42_WORK_DATABASE_URL",
+    "ID42_WORK_WEB_TOKEN",
+    "ID42_WORK_WEB_TOKEN_FILE",
 )
 
 # Matches id42_work.mcp.server.load_factory at the pinned id42-work commit.
@@ -382,6 +384,8 @@ def mcp_server_errors(server: object) -> list[str]:
         key_error = _authority_key_error(extra_env[_AUTHORITY_ENV].strip())
         if key_error:
             errors.append(f"{label}.env.{key_error}")
+    if isinstance(extra_env, dict) and "ID42_WORK_WEB_TOKEN" in extra_env:
+        errors.append(f"{label}.env must not carry ID42_WORK_WEB_TOKEN")
     if isinstance(extra_env, dict):
         string_env = {key: value for key, value in extra_env.items() if isinstance(value, str)}
         for item in _mcp_storage_errors(string_env):
@@ -709,6 +713,8 @@ def public_summary(env_file: Path | None, config_path: Path | None) -> None:
             or _DEFAULT_AUTHORITY_KEY,
             "ID42_WORK_STORAGE": (picked["ID42_WORK_STORAGE"].strip().lower() or _STORAGE_SQLITE),
             "id42_work_database_url_set": bool(picked["ID42_WORK_DATABASE_URL"].strip()),
+            "id42_work_web_token_set": bool(picked["ID42_WORK_WEB_TOKEN"].strip()),
+            "ID42_WORK_WEB_TOKEN_FILE": picked["ID42_WORK_WEB_TOKEN_FILE"].strip(),
         }
     if config_path is not None and config_path.is_file():
         document = _load_json(config_path)

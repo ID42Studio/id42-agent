@@ -372,6 +372,34 @@ if [[ -n "$container_id" ]]; then
   fi
   rm -f "$help_out"
 
+  help_out=$(mktemp)
+  if "${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway \
+    /usr/local/bin/id42-work web serve --help >"$help_out" 2>&1 \
+    && grep -q -- '--factory' "$help_out" \
+    && grep -q -- '--token-file' "$help_out" \
+    && grep -q -- '--host' "$help_out"
+  then
+    good "id42-work web command is available"
+  else
+    bad "id42-work web command is missing or has no --factory, --token-file, or --host"
+    if [[ -s "$help_out" ]]; then
+      tail -n 20 "$help_out" >&2 || true
+    fi
+  fi
+  rm -f "$help_out"
+
+  web_id=$("${COMPOSE[@]}" --profile id42-work-web ps -q id42-work-web 2>/dev/null || true)
+  if [[ -z "$web_id" ]]; then
+    good "id42-work operator UI is not running"
+  else
+    web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
+    if [[ "$web_bind" == "127.0.0.1" ]]; then
+      good "id42-work operator UI is published on 127.0.0.1"
+    else
+      bad "id42-work operator UI is not published on 127.0.0.1"
+    fi
+  fi
+
   work_enabled=$(
     python3 - "$ENV_FILE" "$ROOT/scripts/lib" <<'PY'
 import sys
