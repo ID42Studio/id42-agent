@@ -25,7 +25,9 @@ if [ ! -f "$dir/config.json" ]; then
 fi
 
 # Inline database and connector secrets become mode 0600 files. config.json
-# already holds the paths. This does not write the authority key.
+# already holds the paths. This does not write the authority key. The module
+# switches to uid 1000: this process has no DAC_OVERRIDE, so it cannot search
+# the mode 0700 store after the chown above.
 if ! /app/.venv/bin/python -m id42_agent.materialize; then
     echo "id42-agent: could not store inline secrets as files." >&2
     exit 1

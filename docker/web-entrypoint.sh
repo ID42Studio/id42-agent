@@ -24,6 +24,8 @@ if [ -z "${ID42_WORK_WEB_TOKEN:-}" ]; then
 fi
 
 export PYTHONPATH="/opt/id42-agent${PYTHONPATH:+:$PYTHONPATH}"
+# The module switches to uid 1000. This process has no DAC_OVERRIDE, so it
+# cannot search the mode 0700 store after the chown above.
 if ! /opt/id42-work/venv/bin/python -m id42_agent.materialize; then
     echo "id42-agent: could not store inline secrets as files." >&2
     exit 1

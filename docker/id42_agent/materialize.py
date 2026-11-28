@@ -122,7 +122,30 @@ def materialize(env: Mapping[str, str] | None = None, *, directory: Path | None 
     return written
 
 
+def _become_nanobot() -> None:
+    """Switch to uid 1000 before creating secret files.
+
+    The container keeps only ``CHOWN``, ``SETGID``, and ``SETUID``. After the
+    entrypoint makes ``/var/lib/id42-work`` mode ``0700`` and owned by
+    ``nanobot``, root cannot search that directory. The files have to be
+    created as uid 1000.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        user = pwd.getpwnam("nanobot")
+    except KeyError:
+        raise SystemExit("id42-agent: user nanobot is missing") from None
+    try:
+        os.initgroups(user.pw_name, user.pw_gid)
+        os.setgid(user.pw_gid)
+        os.setuid(user.pw_uid)
+    except OSError as exc:
+        raise SystemExit(f"id42-agent: cannot switch to nanobot: {exc.strerror}") from None
+
+
 def main() -> None:
+    _become_nanobot()
     materialize()
 
 
