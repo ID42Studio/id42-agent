@@ -149,6 +149,43 @@ Executions record `actor_id` and `tenant_id`. The seal itself is not a column in
 
 A crash while the execution is `VALIDATING` marks an `IN_FLIGHT` capability call `UNCERTAIN` without probing. The following resume of that `VALIDATION_FAILED` execution probes. A crash while the execution is still `RUNNING` probes on the first resume, before the call is stored as `UNCERTAIN`, when the provider defines `reconcile`.
 
+### Process death
+
+`SIGKILL` does not give the runner a chance to record `UNCERTAIN` itself. The smoke test kills the process at two committed points. A new process in the same PID namespace then resumes. SQLite can take the dead pid's resume claim. Postgres drops the advisory lock when the connection closes.
+
+**Kill during `notes.append`.** Approval has already moved the grant to `CONSUMED`. The journal row for `append-note` is `IN_FLIGHT`. The execution is `RUNNING`. `requires_reconciliation` is still false, because nothing has classified the call yet.
+
+| Kill point | Note file | Next `resume` |
+|---|---|---|
+| After the line is stored | `operation_id` is on a line | Probe `APPLIED`. Journal `SUCCEEDED`. Replay does not append. Execution `COMPLETED`. One line. |
+| Before the line is stored | `operation_id` is absent | Probe `NOT_APPLIED`. The consumed approval is not reused. Execution `WAITING_APPROVAL` with the same `operation_id`. One new approval calls `notes.append` once. |
+
+When the note file cannot be read, that same resume probes `UNKNOWN`, marks the journal `UNCERTAIN`, and leaves the execution `FAILED` with `requires_reconciliation`. `notes.append` is not called. `scripts/work-reconcile.sh applied --resume` replays the supplied result and does not append. `scripts/work-reconcile.sh not-applied --resume` retries the same `operation_id` and waits for approval. One approval writes one line.
+
+**Kill during validation.** `notes.append` has returned, so the journal is `SUCCEEDED` and the line is stored. The runner has committed `VALIDATING` and `work.outcome.validation_started`. The validation report and the outcome are not stored. The approval stays `CONSUMED`.
+
+The next `resume` replays `append-note` and does not call `notes.append`. It does not emit `work.outcome.validation_started` again. Schema validation runs, the report is stored, and the execution reaches `COMPLETED`. `scripts/work-reconcile.sh list` does not show the call. `scripts/work-approve.sh list` does not show it. A second resume leaves the one line in place.
+
+```text
+WAITING_APPROVAL
+  approve --resume consumes the grant
+RUNNING, journal IN_FLIGHT
+  SIGKILL inside notes.append
+RUNNING, journal IN_FLIGHT
+  resume, file readable
+    APPLIED  -> SUCCEEDED -> COMPLETED
+    NOT_APPLIED -> WAITING_APPROVAL -> one approval -> COMPLETED
+  resume, file unreadable
+    UNCERTAIN, FAILED, requires_reconciliation
+    work-reconcile.sh applied|not-applied resolves it
+RUNNING, journal SUCCEEDED
+  transition VALIDATING
+  SIGKILL before the validation report
+VALIDATING, journal SUCCEEDED, approval CONSUMED
+  resume replays, no second append
+COMPLETED
+```
+
 When the file cannot prove the call, a person decides. The MCP server has no reconcile tool. The command is `id42-work reconcile`. It loads the same factory. It seals `--actor` in the execution's tenant with only `reconcile:<work_id>`. For `note` that grant is `reconcile:note`. The operator id is `id42-operator`, the same id as approvals, and a different id from `id42-agent`. The execution actor cannot reconcile its own call. `applied` and `not-applied` take `--resume` when the host actor should continue. `abandon` does not resume. It leaves the execution `FAILED` with reason `reconciliation_abandoned`.
 
 ```bash
@@ -232,4 +269,4 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 `make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, reports the storage backend, and opens it. SQLite is the usual line. Postgres must accept a connection, and a running Postgres container must not publish a host port. The URL is not printed. It then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. It checks the authority key file: absent is accepted, because the factory creates it mode `0600` on first use; a file that exists must be a regular file, mode `0600`, owned by the gateway user, and not a symlink. The directory must not be writable by others. When `config.json` names `id42-work`, its `ID42_WORK_AUTHORITY_KEY_PATH` must match the path the operator scripts use. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
-The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It starts one more note in an MCP process, stops that process, and has a second process approve it and keep the operator credential without printing it. A new MCP process then reads the completed execution. A third process verifies the credential and the stored grant. `scripts/work-rotate-key.sh` changes the signing key id, and the earlier credential still verifies. A key file changed to mode `0644` is refused by `ActorAuthority` and by a new MCP process. Restoring mode `0600` lets the server start again. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again. It then starts the `postgres` profile in a second Compose project, approves one note from another process, abandons one uncertain note with `scripts/work-reconcile.sh`, rotates the authority key, and requires doctor to report postgres without printing the database URL. The SQLite file is not created for that run.
+The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It starts one more note in an MCP process, stops that process, and has a second process approve it and keep the operator credential without printing it. A new MCP process then reads the completed execution. A third process verifies the credential and the stored grant. `scripts/work-rotate-key.sh` changes the signing key id, and the earlier credential still verifies. A key file changed to mode `0644` is refused by `ActorAuthority` and by a new MCP process. Restoring mode `0600` lets the server start again. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again. It then starts the `postgres` profile in a second Compose project, approves one note from another process, abandons one uncertain note with `scripts/work-reconcile.sh`, rotates the authority key, and requires doctor to report postgres without printing the database URL. The SQLite file is not created for that run. On each backend it also SIGKILLs `notes.append` after the line is stored and before it is stored, and SIGKILLs once the execution is `VALIDATING`. Resume of a readable file probes `APPLIED` or `NOT_APPLIED`. An unreadable file becomes `UNCERTAIN` and `scripts/work-reconcile.sh applied` or `not-applied` resolves it. Validation recovery does not append again.

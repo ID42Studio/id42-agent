@@ -1099,6 +1099,287 @@ abandon_notes=$(grep -cx "note=smoke-recon-abandon" "$WORKDIR/recon-notes.out" |
   || id42_die "note counts applied=${applied_notes} missing=${missing_notes} abandon=${abandon_notes}"
 echo "OK uncertain notes reconcile from the file, and abandon stays failed"
 
+# SIGKILL during notes.append or during validation, then a new process.
+# Both storage backends call this. scan_outputs=yes redacts the database URL.
+governed_process_crashes() {
+  local env_file=$1
+  local project=$2
+  local prefix=$3
+  local scan_outputs=$4
+
+  crash_py() {
+    local name=$1
+    shift
+    local file=$WORKDIR/${prefix}-${name}.out
+    local errors=$WORKDIR/${prefix}-${name}.err
+    if ! COMPOSE_PROJECT_NAME=$project \
+      docker compose --env-file "$env_file" -f "$ROOT/docker-compose.yml" \
+      run --rm --no-deps -T --user 1000 \
+      --entrypoint /opt/id42-work/venv/bin/python \
+      -e PYTHONPATH=/opt/id42-agent \
+      -v "$ROOT/scripts/lib/process_crash.py:/tmp/process_crash.py:ro" \
+      nanobot-gateway /tmp/process_crash.py "$@" >"$file" 2>"$errors"
+    then
+      cat "$errors" >&2 || true
+      id42_die "process crash ${name} failed"
+    fi
+    sed -i 's/\r$//' "$file" "$errors" || true
+    if [[ "$scan_outputs" == "yes" ]]; then
+      scan_secrets "$file" "$errors"
+    fi
+    if grep -q 'id42a1\.' "$file" "$errors"; then
+      id42_die "process crash ${name} printed an actor credential"
+    fi
+    printf '%s\n' "$file"
+  }
+
+  host_script() {
+    local name=$1
+    local script=$2
+    shift 2
+    local file=$WORKDIR/${prefix}-${name}.out
+    local errors=$WORKDIR/${prefix}-${name}.err
+    if ! ID42_ENV_FILE=$env_file COMPOSE_PROJECT_NAME=$project \
+      "$ROOT/scripts/${script}" "$@" >"$file" 2>"$errors"
+    then
+      cat "$errors" >&2 || true
+      id42_die "process crash ${name} failed"
+    fi
+    sed -i 's/\r$//' "$file" "$errors" || true
+    if [[ "$scan_outputs" == "yes" ]]; then
+      scan_secrets "$file" "$errors"
+    fi
+    if grep -q 'id42a1\.' "$file" "$errors"; then
+      id42_die "process crash ${name} printed an actor credential"
+    fi
+    printf '%s\n' "$file"
+  }
+
+  assert_killed_claim() {
+    local file=$1
+    require_field "$file" child_signal 9
+    require_field "$file" before_approval_consumed 1
+    require_field "$file" before_approval_granted 0
+    require_field "$file" before_approval_pending 0
+    require_field "$file" before_requires_reconciliation false
+    require_field "$file" before_invoked 1
+    require_field "$file" before_replayed 0
+    require_field "$file" before_probe none
+    require_field "$file" before_outcome false
+    require_field "$file" notes_mode 600
+  }
+
+  local report exec_id operation_id byte_count approval_id
+
+  echo "== ${prefix}: SIGKILL after the note line, probe APPLIED =="
+  report=$(crash_py probe-after drive probe-after "${prefix}-probe-applied" "${prefix}-probe-applied")
+  assert_killed_claim "$report"
+  require_field "$report" before_status RUNNING
+  require_field "$report" before_journal_status IN_FLIGHT
+  require_field "$report" before_operation_notes 1
+  require_field "$report" before_validation_started 0
+  require_field "$report" after_status COMPLETED
+  require_field "$report" after_journal_status SUCCEEDED
+  require_field "$report" after_probe APPLIED
+  require_field "$report" after_operation_notes 1
+  require_field "$report" after_invoked 1
+  require_field "$report" after_replayed 1
+  require_field "$report" after_requires_reconciliation false
+  require_field "$report" after_outcome true
+  exec_id=$(crash_field execution_id "$report")
+  operation_id=$(crash_field operation_id "$report")
+  report=$(crash_py probe-after-again resume "$exec_id")
+  require_field "$report" state_status COMPLETED
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 1
+  require_field "$report" state_operation_id "$operation_id"
+
+  echo "== ${prefix}: SIGKILL before the note line, probe NOT_APPLIED =="
+  report=$(crash_py probe-before drive probe-before "${prefix}-probe-missing" "${prefix}-probe-missing")
+  assert_killed_claim "$report"
+  require_field "$report" before_status RUNNING
+  require_field "$report" before_journal_status IN_FLIGHT
+  require_field "$report" before_operation_notes 0
+  require_field "$report" after_status WAITING_APPROVAL
+  require_field "$report" after_status_reason awaiting_action_approval
+  require_field "$report" after_journal_status PENDING_APPROVAL
+  require_field "$report" after_probe NOT_APPLIED
+  require_field "$report" after_operation_notes 0
+  require_field "$report" after_invoked 1
+  require_field "$report" after_replayed 0
+  require_field "$report" after_requires_reconciliation false
+  require_field "$report" after_approval_pending 1
+  exec_id=$(crash_field execution_id "$report")
+  operation_id=$(crash_field operation_id "$report")
+  [[ "$(crash_field after_operation_id "$report")" == "$operation_id" ]] \
+    || id42_die "NOT_APPLIED changed the operation id"
+  approval_id=$(crash_field after_pending_approval_id "$report")
+  [[ -n "$approval_id" ]] || id42_die "NOT_APPLIED did not request approval"
+  report=$(host_script probe-before-list work-approve.sh list)
+  require_pending_line "$report" "$exec_id"
+  report=$(host_script probe-before-approve work-approve.sh approve "$approval_id" --reason "retry once")
+  grep -q "execution_status=COMPLETED" "$report" \
+    || id42_die "the single NOT_APPLIED retry did not complete"
+  report=$(crash_py probe-before-done inspect "$exec_id")
+  require_field "$report" state_status COMPLETED
+  require_field "$report" state_journal_status SUCCEEDED
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 2
+  require_field "$report" state_operation_id "$operation_id"
+  report=$(crash_py probe-before-again resume "$exec_id")
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 2
+  require_field "$report" state_operation_id "$operation_id"
+
+  echo "== ${prefix}: SIGKILL after the line, operator applied =="
+  report=$(crash_py operator-after drive operator-after "${prefix}-op-applied" "${prefix}-op-applied")
+  assert_killed_claim "$report"
+  require_field "$report" before_status RUNNING
+  require_field "$report" before_journal_status IN_FLIGHT
+  require_field "$report" before_operation_notes 1
+  require_field "$report" after_status FAILED
+  require_field "$report" after_status_reason uncertain_outcome
+  require_field "$report" after_requires_reconciliation true
+  require_field "$report" after_journal_status UNCERTAIN
+  require_field "$report" after_operation_notes 1
+  require_field "$report" after_invoked 1
+  require_field "$report" after_replayed 0
+  require_field "$report" after_probe none
+  exec_id=$(crash_field execution_id "$report")
+  operation_id=$(crash_field operation_id "$report")
+  byte_count=$(crash_field byte_count "$report")
+  [[ "$byte_count" =~ ^[0-9]+$ ]] || id42_die "byte_count is not an integer"
+  report=$(host_script operator-after-list work-reconcile.sh list)
+  grep -q "execution_id=${exec_id} " "$report" \
+    || id42_die "work-reconcile.sh list missed the killed append"
+  grep -q "operation_id=${operation_id}" "$report" \
+    || id42_die "work-reconcile.sh list changed the operation id"
+  report=$(host_script operator-after-show work-reconcile.sh show "$exec_id" append-note)
+  grep -q '"journal_status": "UNCERTAIN"' "$report" \
+    || id42_die "work-reconcile.sh show did not report UNCERTAIN"
+  grep -q "\"operation_id\": \"${operation_id}\"" "$report" \
+    || id42_die "work-reconcile.sh show changed the operation id"
+  report=$(host_script operator-after-applied work-reconcile.sh applied "$exec_id" append-note \
+    --reason "the line is in the file" \
+    --result "{\"appended\": true, \"byte_count\": ${byte_count}}" \
+    --resume)
+  grep -q "applied execution_id=${exec_id} " "$report" \
+    || id42_die "work-reconcile.sh applied did not report the execution"
+  grep -q "journal_status=SUCCEEDED" "$report" \
+    || id42_die "work-reconcile.sh applied did not record the call"
+  grep -q "execution_status=COMPLETED" "$report" \
+    || id42_die "work-reconcile.sh applied did not resume to COMPLETED"
+  grep -q "resumed=true" "$report" \
+    || id42_die "work-reconcile.sh applied did not resume"
+  grep -q "decision_actor_id=id42-operator" "$report" \
+    || id42_die "work-reconcile.sh applied did not record id42-operator"
+  report=$(crash_py operator-after-done inspect "$exec_id")
+  require_field "$report" state_status COMPLETED
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 1
+  require_field "$report" state_replayed 1
+  require_field "$report" state_operation_id "$operation_id"
+  report=$(host_script operator-after-clear work-reconcile.sh list)
+  if grep -q "execution_id=${exec_id}" "$report"; then
+    id42_die "work-reconcile.sh list still shows the applied call"
+  fi
+
+  echo "== ${prefix}: SIGKILL before the line, operator not-applied =="
+  report=$(crash_py operator-before drive operator-before "${prefix}-op-missing" "${prefix}-op-missing")
+  assert_killed_claim "$report"
+  require_field "$report" before_status RUNNING
+  require_field "$report" before_journal_status IN_FLIGHT
+  require_field "$report" before_operation_notes 0
+  require_field "$report" after_status FAILED
+  require_field "$report" after_status_reason uncertain_outcome
+  require_field "$report" after_requires_reconciliation true
+  require_field "$report" after_journal_status UNCERTAIN
+  require_field "$report" after_operation_notes 0
+  require_field "$report" after_invoked 1
+  require_field "$report" after_probe none
+  exec_id=$(crash_field execution_id "$report")
+  operation_id=$(crash_field operation_id "$report")
+  report=$(host_script operator-before-decide work-reconcile.sh not-applied "$exec_id" append-note \
+    --reason "nothing was written" \
+    --resume)
+  grep -q "not-applied execution_id=${exec_id} " "$report" \
+    || id42_die "work-reconcile.sh not-applied did not report the execution"
+  grep -q "execution_status=WAITING_APPROVAL" "$report" \
+    || id42_die "work-reconcile.sh not-applied did not ask for approval again"
+  grep -q "journal_status=PENDING_APPROVAL" "$report" \
+    || id42_die "work-reconcile.sh not-applied did not keep the same action pending"
+  grep -q "resumed=true" "$report" \
+    || id42_die "work-reconcile.sh not-applied did not resume"
+  grep -q "decision_actor_id=id42-operator" "$report" \
+    || id42_die "work-reconcile.sh not-applied did not record id42-operator"
+  report=$(crash_py operator-before-waiting inspect "$exec_id")
+  require_field "$report" state_status WAITING_APPROVAL
+  require_field "$report" state_operation_notes 0
+  require_field "$report" state_invoked 1
+  require_field "$report" state_operation_id "$operation_id"
+  report=$(host_script operator-before-list work-approve.sh list)
+  approval_id=$(approval_id_for "$report" "$exec_id") \
+    || id42_die "the not-applied retry did not ask for approval"
+  require_pending_line "$report" "$exec_id"
+  report=$(host_script operator-before-approve work-approve.sh approve "$approval_id" --reason "retry once")
+  grep -q "execution_status=COMPLETED" "$report" \
+    || id42_die "the single not-applied retry did not complete"
+  report=$(crash_py operator-before-done inspect "$exec_id")
+  require_field "$report" state_status COMPLETED
+  require_field "$report" state_journal_status SUCCEEDED
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 2
+  require_field "$report" state_operation_id "$operation_id"
+  report=$(crash_py operator-before-again resume "$exec_id")
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 2
+  require_field "$report" state_operation_id "$operation_id"
+
+  echo "== ${prefix}: SIGKILL during validation =="
+  report=$(crash_py validating drive validating "${prefix}-validating" "${prefix}-validating")
+  assert_killed_claim "$report"
+  require_field "$report" before_status VALIDATING
+  require_field "$report" before_journal_status SUCCEEDED
+  require_field "$report" before_operation_notes 1
+  require_field "$report" before_validation_started 1
+  require_field "$report" before_validation_report 0
+  require_field "$report" after_status COMPLETED
+  require_field "$report" after_journal_status SUCCEEDED
+  require_field "$report" after_operation_notes 1
+  require_field "$report" after_invoked 1
+  require_field "$report" after_replayed 1
+  require_field "$report" after_validation_started 1
+  require_field "$report" after_validation_report 1
+  require_field "$report" after_outcome true
+  require_field "$report" after_requires_reconciliation false
+  require_field "$report" after_approval_pending 0
+  require_field "$report" after_approval_consumed 1
+  exec_id=$(crash_field execution_id "$report")
+  operation_id=$(crash_field operation_id "$report")
+  [[ "$(crash_field after_operation_id "$report")" == "$operation_id" ]] \
+    || id42_die "validation recovery changed the operation id"
+  report=$(host_script validating-reconcile work-reconcile.sh list)
+  if grep -q "execution_id=${exec_id}" "$report"; then
+    id42_die "validation recovery left a call for reconcile"
+  fi
+  report=$(host_script validating-approvals work-approve.sh list)
+  if grep -q "execution_id=${exec_id}" "$report"; then
+    id42_die "validation recovery asked for another approval"
+  fi
+  report=$(crash_py validating-again resume "$exec_id")
+  require_field "$report" state_status COMPLETED
+  require_field "$report" state_operation_notes 1
+  require_field "$report" state_invoked 1
+  require_field "$report" state_operation_id "$operation_id"
+  report=$(host_script crash-reconcile-clear work-reconcile.sh list)
+  grep -qx "uncertain-none" "$report" \
+    || id42_die "a process-death call was still uncertain"
+}
+
+echo "== id42-work process death =="
+governed_process_crashes "$ENV_FILE" "$PROJECT" "sqlite" "no"
+echo "OK process death recovers on sqlite"
+
 echo "== doctor security baseline on the running gateway =="
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   "$ROOT/scripts/doctor.sh" >"$WORKDIR/doctor.out" 2>"$WORKDIR/doctor.err" || true
@@ -1366,6 +1647,10 @@ scan_secrets "$WORKDIR/pg-inspect.out"
 require_field "$WORKDIR/pg-inspect.out" journal_status ABANDONED
 require_field "$WORKDIR/pg-inspect.out" status FAILED
 echo "OK postgres reconciliation abandons one uncertain note"
+
+echo "== id42-work process death on postgres =="
+governed_process_crashes "$PG_ENV" "$PG_PROJECT" "pg" "yes"
+echo "OK process death recovers on postgres"
 
 ID42_ENV_FILE=$PG_ENV COMPOSE_PROJECT_NAME=$PG_PROJECT \
   "$ROOT/scripts/work-rotate-key.sh" | tee "$WORKDIR/pg-rotate.out"

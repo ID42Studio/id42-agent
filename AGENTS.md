@@ -40,7 +40,7 @@ docker compose --env-file .env.example --profile postgres config --quiet
 ./scripts/smoke-test.sh
 ```
 
-`make test` runs the smoke test. The smoke test builds the image, boots a gateway with a dummy model URL, and requires `GET /health` to report ready. It keeps that SQLite run, then starts the `postgres` profile and checks one cross-process approval and one reconciliation. It does not call a real Ollama or Telegram.
+`make test` runs the smoke test. The smoke test builds the image, boots a gateway with a dummy model URL, and requires `GET /health` to report ready. It keeps that SQLite run, then starts the `postgres` profile and checks one cross-process approval and one reconciliation. Both backends also SIGKILL a governed note append and a validation phase and recover them. It does not call a real Ollama or Telegram.
 
 ## License
 
