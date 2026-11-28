@@ -9,11 +9,14 @@ import asyncio
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
 import id42_agent.mcp_host as host
 import id42_agent.mcp_stub as stub
+from datetime import timedelta
+
 from id42_work import (
     ActorAuthority,
     AuthorityKeyError,
@@ -21,6 +24,7 @@ from id42_work import (
     ReconciliationVerdict,
     TrustedActor,
 )
+from id42_work.mcp import McpCallError, McpCaller, bind_mcp_caller
 
 
 def _call(operation: object) -> CapabilityCall:
@@ -88,6 +92,69 @@ def _check_postgres_extra() -> None:
             raise SystemExit(f"nanobot virtualenv can run {statement}")
 
 
+def _check_pages_and_session(server: object) -> None:
+    """List tools are paged, and the stdio actor stays pinned to the process."""
+
+    async def check() -> None:
+        first = await server.list_works(limit=1)
+        if not isinstance(first.get("works"), list) or len(first["works"]) != 1:
+            raise SystemExit("list_works limit did not return one work")
+        cursor = first.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor.startswith("id42c1."):
+            raise SystemExit("list_works did not return a cursor")
+        seen = {first["works"][0]["id"]}
+        pages = 1
+        while cursor is not None:
+            page = await server.list_works(limit=1, cursor=cursor)
+            works = page.get("works")
+            if not isinstance(works, list) or len(works) != 1:
+                raise SystemExit("a later list_works page was empty")
+            seen.add(works[0]["id"])
+            cursor = page.get("next_cursor")
+            pages += 1
+            if pages > 10:
+                raise SystemExit("list_works did not finish paging")
+        if seen != set(host.DEFAULT_WORK_IDS) or pages != len(host.DEFAULT_WORK_IDS):
+            raise SystemExit(f"paged works {sorted(seen)}")
+        try:
+            with bind_mcp_caller(McpCaller(transport="http", session_id="build")):
+                await server.list_works()
+        except McpCallError as exc:
+            if "credential" not in str(exc):
+                raise SystemExit(f"http without a credential failed as {exc}") from exc
+        else:
+            raise SystemExit("http without a credential was accepted")
+        credential = server.host_actor().to_credential()
+        try:
+            with bind_mcp_caller(
+                McpCaller(transport="http", session_id="build", credential=credential)
+            ):
+                await server.list_works(limit=50)
+            other = server.authority.issue(
+                actor_id="id42-other",
+                tenant_id=host.TENANT_ID,
+                grants=frozenset(),
+                ttl=timedelta(minutes=5),
+            )
+            with bind_mcp_caller(
+                McpCaller(
+                    transport="http",
+                    session_id="build",
+                    credential=other.to_credential(),
+                )
+            ):
+                await server.list_works()
+        except McpCallError as exc:
+            if "session actor changed" not in str(exc):
+                raise SystemExit(f"a second session actor failed as {exc}") from exc
+        else:
+            raise SystemExit("a second session actor was accepted")
+        finally:
+            del credential
+
+    asyncio.run(check())
+
+
 def main() -> None:
     _check_postgres_extra()
     server = host.server()
@@ -96,6 +163,9 @@ def main() -> None:
     ids = sorted(item["id"] for item in listed["works"])
     if ids != sorted(host.DEFAULT_WORK_IDS):
         raise SystemExit(f"works {ids}")
+    if listed.get("next_cursor") is not None:
+        raise SystemExit("the default page returned a cursor")
+    _check_pages_and_session(server)
     if type(stub.server()).__name__ != "WorkMcpServer":
         raise SystemExit("stub factory did not return a WorkMcpServer")
     actor = host.issue_agent(ActorAuthority(host.AUTHORITY_ID))
@@ -138,6 +208,26 @@ def main() -> None:
         raise SystemExit(f"unreadable file reconciled as {unreadable.verdict}")
     host.DEFAULT_AUTHORITY_KEY.unlink(missing_ok=True)
     Path(str(host.DEFAULT_AUTHORITY_KEY) + ".lock").unlink(missing_ok=True)
+    _check_connectors()
+
+
+def _check_connectors() -> None:
+    """Run the connector probe in a child so its socket block stays there."""
+    env = os.environ.copy()
+    env["ID42_WORK_STORAGE"] = "sqlite"
+    env.pop("ID42_WORK_DATABASE_URL", None)
+    env.pop("ID42_WORK_ODOO_ENABLED", None)
+    env.pop("ID42_WORK_GITHUB_ENABLED", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "id42_agent.connector_probe"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0 or "connector-probe-ok" not in completed.stdout:
+        detail = (completed.stderr or completed.stdout or "connector probe failed").strip()
+        raise SystemExit(detail[-1000:])
 
 
 if __name__ == "__main__":

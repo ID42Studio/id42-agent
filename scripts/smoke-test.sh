@@ -23,7 +23,8 @@ cleanup() {
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
-      docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" down -v --remove-orphans \
+      docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+      down -v --remove-orphans \
       >/dev/null 2>&1 || true
   fi
   rm -rf "$WORKDIR"
@@ -467,6 +468,72 @@ if "ID42_WORK_STORAGE" in sqlite_server["env"] or "ID42_WORK_DATABASE_URL" in sq
 print("postgres storage is passed to the MCP child and is not printed")
 PY
 
+python3 - "$CONFIG_PY" <<'PY'
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("id42_config", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+base = {
+    "TZ": "America/Sao_Paulo",
+    "OLLAMA_BASE_URL": "http://host.docker.internal:9/v1",
+    "OLLAMA_MODEL": "smoke-model",
+    "TELEGRAM_ENABLED": "false",
+    "NANOBOT_WEB_TOKEN": "smoke-web-token-do-not-leak",
+    "ID42_WORK_ENABLED": "false",
+    "ODOO_URL": "http://odoo.internal",
+    "GITHUB_TOKEN": "smoke-github-token-do-not-leak",
+}
+off = mod.build_config(base)
+assert "mcpServers" not in off["tools"] or "id42-work" not in off["tools"].get("mcpServers", {})
+summary = {}
+# Flags off must not require credentials, and a later enabled render must not
+# copy a GitHub token when a file is configured.
+enabled = dict(base)
+enabled["ID42_WORK_ENABLED"] = "true"
+enabled["ID42_WORK_ODOO_ENABLED"] = "true"
+enabled["ODOO_DB"] = "probe"
+enabled["ODOO_USER"] = "probe"
+enabled["ODOO_API_KEY_FILE"] = "/var/lib/id42-work/odoo.key"
+enabled["ID42_WORK_ODOO_READ_MODELS"] = "res.partner"
+enabled["ID42_WORK_ODOO_WRITE_MODELS"] = "res.partner"
+enabled["ID42_WORK_GITHUB_ENABLED"] = "true"
+enabled["ID42_WORK_GITHUB_REPOSITORIES"] = "acme/widgets"
+enabled["ID42_WORK_GITHUB_TOKEN_FILE"] = "/var/lib/id42-work/github.token"
+del enabled["GITHUB_TOKEN"]
+doc = mod.build_config(enabled)
+server_env = doc["tools"]["mcpServers"]["id42-work"]["env"]
+assert server_env["ID42_WORK_ODOO_ENABLED"] == "true"
+assert server_env["ID42_WORK_GITHUB_ENABLED"] == "true"
+assert server_env["ODOO_API_KEY_FILE"] == "/var/lib/id42-work/odoo.key"
+assert "ODOO_API_KEY" not in server_env
+assert "GITHUB_TOKEN" not in server_env
+assert "odoo.search" not in json.dumps(server_env)
+both = dict(enabled)
+both["GITHUB_TOKEN"] = "smoke-github-token-do-not-leak"
+try:
+    mod.build_config(both)
+except mod.ConfigError as exc:
+    if "not both" not in str(exc):
+        raise SystemExit(f"unexpected connector error: {exc}")
+else:
+    raise SystemExit("github token and token file were both accepted")
+missing = dict(enabled)
+del missing["ODOO_URL"]
+try:
+    mod.build_config(missing)
+except mod.ConfigError as exc:
+    if "ODOO_URL" not in str(exc):
+        raise SystemExit(f"unexpected odoo error: {exc}")
+else:
+    raise SystemExit("odoo without a URL was accepted")
+if "smoke-github-token-do-not-leak" in json.dumps(doc):
+    raise SystemExit("rendered config contained the github token")
+print("connector settings stay out until enabled and do not print secrets")
+PY
+
 echo "== compose config =="
 COMPOSE_PROJECT_NAME=$PROJECT docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" config >/dev/null
 
@@ -520,6 +587,21 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
 sed -i 's/\r$//' "$WORKDIR/mcp-probe"
 grep -q "mcp-stdio-ok" "$WORKDIR/mcp-probe"
 grep -qx "works=echo,note,note.list" "$WORKDIR/mcp-probe"
+
+echo "== connector registration =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
+  --entrypoint /opt/id42-work/venv/bin/python \
+  -e PYTHONPATH=/opt/id42-agent \
+  nanobot-gateway -m id42_agent.connector_probe | tee "$WORKDIR/connector-probe.out"
+sed -i 's/\r$//' "$WORKDIR/connector-probe.out"
+grep -q "connector-probe-ok" "$WORKDIR/connector-probe.out" \
+  || id42_die "connector probe did not pass"
+if grep -q "probe-token-not-secret" "$WORKDIR/connector-probe.out" \
+  || grep -q "odoo-probe-key" "$WORKDIR/connector-probe.out"
+then
+  id42_die "connector probe printed a credential"
+fi
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" run --rm --no-deps -T --user 1000 \
   --entrypoint /app/.venv/bin/python \
@@ -621,6 +703,8 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   nanobot-gateway - persist-check "$echo_id" "$note_id" <"$ROOT/scripts/lib/mcp_probe.py" \
   | tee "$WORKDIR/persist-check.out"
 grep -q "persist-ok" "$WORKDIR/persist-check.out"
+grep -q "execution_pages=2" "$WORKDIR/persist-check.out" \
+  || id42_die "list_executions did not return one page per execution"
 echo "OK id42-work executions are still listed after a gateway restart"
 
 echo "== id42-work native approvals =="
@@ -696,6 +780,151 @@ sed -i 's/\r$//' "$WORKDIR/approve-list.out"
 approve_approval=$(approval_id_for "$WORKDIR/approve-list.out" "$approve_exec") \
   || id42_die "approvals list did not include the waiting note"
 require_pending_line "$WORKDIR/approve-list.out" "$approve_exec"
+
+echo "== id42-work operator UI lists the pending approval =="
+web_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+web_token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+printf 'ID42_WORK_WEB_TOKEN=%s\nID42_WORK_WEB_PUBLISH_PORT=%s\n' "$web_token" "$web_port" >>"$ENV_FILE"
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+  up -d id42-work-web
+web_id=""
+web_health=""
+for _ in $(seq 1 40); do
+  web_id=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+    ps -q id42-work-web || true)
+  web_health=$(docker inspect --format '{{.State.Health.Status}}' "$web_id" 2>/dev/null || true)
+  if [[ "$web_health" == "healthy" ]]; then
+    break
+  fi
+  sleep 2
+done
+capture_web_logs() {
+  ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+    logs id42-work-web >"$WORKDIR/web.log" || true
+  if grep -q "$web_token" "$WORKDIR/web.log"; then
+    id42_die "operator UI logs contained the token"
+  fi
+}
+if [[ "$web_health" != "healthy" ]]; then
+  capture_web_logs
+  tail -n 80 "$WORKDIR/web.log" >&2 || true
+  id42_die "operator UI did not become healthy"
+fi
+web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
+[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1"
+ID42_WORK_WEB_TOKEN=$web_token ID42_WORK_WEB_URL="http://127.0.0.1:${web_port}" \
+  python3 - "$WORKDIR/web-ui.out" <<'PY'
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+out_path, = sys.argv[1:]
+base = os.environ["ID42_WORK_WEB_URL"].rstrip("/")
+token = os.environ["ID42_WORK_WEB_TOKEN"]
+origin = base
+
+
+class Response:
+    def __init__(self, status, headers, body):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the status from / and from sign-in. Both answer 303."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def request(method, path, *, headers=None, data=None):
+    req = urllib.request.Request(base + path, data=data, method=method, headers=headers or {})
+    try:
+        with _OPENER.open(req, timeout=15) as response:
+            return Response(response.status, response.headers, response.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read() if exc.fp is not None else b""
+        return Response(exc.code, exc.headers, body)
+
+
+anonymous = request("GET", "/")
+if anonymous.status not in {302, 303, 307, 401}:
+    raise SystemExit(f"anonymous home status {anonymous.status}")
+login = request("GET", "/login")
+if login.status != 200 or b"Sign in" not in login.body:
+    raise SystemExit(f"login page status {login.status}")
+sheet = request("GET", "/static/operator.css")
+if sheet.status != 200 or b"text/css" not in sheet.headers.get("Content-Type", "").encode():
+    raise SystemExit(f"stylesheet status {sheet.status}")
+match = re.search(br'name="csrf" value="([^"]+)"', login.body)
+if match is None:
+    raise SystemExit("login page had no csrf field")
+csrf = match.group(1).decode("ascii")
+cookie = login.headers.get("Set-Cookie", "")
+if "id42_csrf=" not in cookie:
+    raise SystemExit("login page set no csrf cookie")
+form = urllib.parse.urlencode(
+    {"csrf": csrf, "token": token, "actor_id": "id42-operator", "credential": ""}
+).encode("ascii")
+signed = request(
+    "POST",
+    "/login",
+    data=form,
+    headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": origin,
+        "Cookie": cookie.split(";", 1)[0],
+    },
+)
+if signed.status not in {302, 303}:
+    raise SystemExit(f"sign-in status {signed.status}")
+session = ""
+for value in signed.headers.get_all("Set-Cookie") or []:
+    if value.startswith("id42_session="):
+        session = value.split(";", 1)[0]
+if not session:
+    raise SystemExit("sign-in set no session cookie")
+home = request("GET", "/", headers={"Cookie": session})
+text = home.body.decode("utf-8", errors="replace")
+if home.status != 200 or ">note<" not in text or "PENDING" not in text:
+    raise SystemExit(f"home did not list the pending note (status {home.status})")
+reconcile = request("GET", "/reconcile", headers={"Cookie": session})
+if reconcile.status != 200 or b"Reconciliation" not in reconcile.body:
+    raise SystemExit(f"reconcile page status {reconcile.status}")
+report = "\n".join(
+    [
+        f"anonymous={anonymous.status}",
+        "login=200",
+        f"sign_in={signed.status}",
+        "home=pending-note",
+        "reconcile=200",
+        "",
+    ]
+)
+if token in report or token in text:
+    raise SystemExit("operator UI page contained the token")
+open(out_path, "w", encoding="utf-8").write(report)
+print("operator UI listed the pending note")
+PY
+if grep -q "$web_token" "$WORKDIR/web-ui.out"; then
+  id42_die "operator UI check output contained the token"
+fi
+grep -q "home=pending-note" "$WORKDIR/web-ui.out"
+capture_web_logs
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+  stop id42-work-web >/dev/null
+echo "OK operator UI serves on loopback and lists the pending approval"
 
 approvals_cmd approve "$approve_approval" \
   --factory id42_agent.mcp_host:server \
@@ -1411,13 +1640,25 @@ if ! grep -q "OK: id42-work storage config has no MCP server env to compare" "$W
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not report the absent storage config"
 fi
+if ! grep -q "OK: id42-work list_works is paged" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm paged list_works"
+fi
 if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the default works"
 fi
-if ! grep -q "OK: id42-work pin is d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9" "$WORKDIR/doctor.out"; then
+if ! grep -q "OK: id42-work pin is ae07623aa67c0b5d0535cb58f6a2e2b204736e50" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work pin"
+fi
+if ! grep -q "OK: id42-work-odoo pin is 3797544d8a3580657548d000110915578efe87c3" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work-odoo pin"
+fi
+if ! grep -q "OK: id42-work-github pin is 2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work-github pin"
 fi
 if ! grep -q "OK: authority key file is mode 0600" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
@@ -1426,6 +1667,14 @@ fi
 if ! grep -q "OK: id42-work approvals command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work approvals command"
+fi
+if ! grep -q "OK: id42-work web command is available" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the id42-work web command"
+fi
+if ! grep -q "OK: id42-work operator UI is not running" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm the operator UI was stopped"
 fi
 if ! grep -q "OK: id42-work reconcile command is available" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2

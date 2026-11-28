@@ -237,10 +237,30 @@ if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
   nanobot-gateway - <"$ROOT/scripts/lib/mcp_probe.py" | tee "$probe_out"
 then
   sed -i 's/\r$//' "$probe_out"
-  if grep -qx 'works=echo,note,note.list' "$probe_out"; then
-    good "id42-work lists echo, note, and note.list"
+  expected_works=$(PYTHONPATH="$ROOT/docker:$ROOT/scripts/lib" python3 - "$ENV_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+from config import load_env_file
+from id42_agent.connectors import configured_work_ids
+
+print(",".join(configured_work_ids(load_env_file(Path(sys.argv[1])))))
+PY
+)
+  expected_pages=$(python3 -c 'import sys; print(len([item for item in sys.argv[1].split(",") if item]))' "$expected_works")
+  if grep -qx "works=${expected_works}" "$probe_out"; then
+    if [[ "$expected_works" == "echo,note,note.list" ]]; then
+      good "id42-work lists echo, note, and note.list"
+    else
+      good "id42-work lists the configured works"
+    fi
   else
-    bad "id42-work did not list echo, note, and note.list"
+    bad "id42-work did not list ${expected_works}"
+  fi
+  if grep -qx "work_pages=${expected_pages}" "$probe_out"; then
+    good "id42-work list_works is paged"
+  else
+    bad "id42-work list_works did not page every registered work"
   fi
   good "id42-work MCP server answered on stdio"
 else
@@ -324,7 +344,7 @@ rm -f "$key_out"
 
 if [[ -n "$container_id" ]]; then
   # Keep in sync with the Dockerfile default for ID42_WORK_REF.
-  expected_pin=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
+  expected_pin=ae07623aa67c0b5d0535cb58f6a2e2b204736e50
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
   pin=${pin//$'\r'/}
   pin=${pin//$'\n'/}
@@ -332,6 +352,25 @@ if [[ -n "$container_id" ]]; then
     bad "id42-work pin is ${pin:-missing}, expected $expected_pin"
   else
     good "id42-work pin is $pin"
+  fi
+  # Keep in sync with the Dockerfile defaults.
+  expected_odoo_pin=3797544d8a3580657548d000110915578efe87c3
+  expected_github_pin=2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3
+  odoo_pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_ODOO_REF' 2>/dev/null || true)
+  github_pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_GITHUB_REF' 2>/dev/null || true)
+  odoo_pin=${odoo_pin//$'\r'/}
+  odoo_pin=${odoo_pin//$'\n'/}
+  github_pin=${github_pin//$'\r'/}
+  github_pin=${github_pin//$'\n'/}
+  if [[ "$odoo_pin" != "$expected_odoo_pin" ]]; then
+    bad "id42-work-odoo pin is ${odoo_pin:-missing}, expected $expected_odoo_pin"
+  else
+    good "id42-work-odoo pin is $odoo_pin"
+  fi
+  if [[ "$github_pin" != "$expected_github_pin" ]]; then
+    bad "id42-work-github pin is ${github_pin:-missing}, expected $expected_github_pin"
+  else
+    good "id42-work-github pin is $github_pin"
   fi
 
   help_out=$(mktemp)
@@ -366,6 +405,34 @@ if [[ -n "$container_id" ]]; then
     fi
   fi
   rm -f "$help_out"
+
+  help_out=$(mktemp)
+  if "${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway \
+    /usr/local/bin/id42-work web serve --help >"$help_out" 2>&1 \
+    && grep -q -- '--factory' "$help_out" \
+    && grep -q -- '--token-file' "$help_out" \
+    && grep -q -- '--host' "$help_out"
+  then
+    good "id42-work web command is available"
+  else
+    bad "id42-work web command is missing or has no --factory, --token-file, or --host"
+    if [[ -s "$help_out" ]]; then
+      tail -n 20 "$help_out" >&2 || true
+    fi
+  fi
+  rm -f "$help_out"
+
+  web_id=$("${COMPOSE[@]}" --profile id42-work-web ps -q id42-work-web 2>/dev/null || true)
+  if [[ -z "$web_id" ]]; then
+    good "id42-work operator UI is not running"
+  else
+    web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
+    if [[ "$web_bind" == "127.0.0.1" ]]; then
+      good "id42-work operator UI is published on 127.0.0.1"
+    else
+      bad "id42-work operator UI is not published on 127.0.0.1"
+    fi
+  fi
 
   work_enabled=$(
     python3 - "$ENV_FILE" "$ROOT/scripts/lib" <<'PY'

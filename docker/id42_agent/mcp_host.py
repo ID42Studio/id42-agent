@@ -51,6 +51,20 @@ command and the reconcile command load this same factory, so they seal
 ``OPERATOR_ID`` with the same keys. A credential issued in one process
 verifies in the next. This module does not seal the operator. Each
 command does, with only the grant that decision needs.
+
+The MCP server passes ``session_actor=credential_session_actor`` with
+this factory's ``issue`` as the fallback. Stdio has no credential header,
+so every stdio call is that one sealed actor, and the server pins the
+identity for the process. HTTP requires ``Id42-Actor-Credential`` and
+pins the first verified identity of each session. ``host_actor`` stays
+the factory actor, which is what ``--resume`` uses. Listing tools return
+one page (``limit`` and ``cursor``).
+
+``ID42_WORK_ODOO_ENABLED`` and ``ID42_WORK_GITHUB_ENABLED`` register the
+optional connectors. Unset or false leaves the three works above unchanged.
+The execution actor receives only the capabilities those works call. It
+does not receive approve or reconcile grants, and it does not receive the
+connectors' other capabilities.
 """
 
 from __future__ import annotations
@@ -87,7 +101,9 @@ from id42_work import (
     WorkRunner,
     authority_key_path_from_env,
 )
-from id42_work.mcp import WorkMcpServer
+from id42_work.mcp import WorkMcpServer, credential_session_actor
+
+from id42_agent.connectors import close_providers, execution_grants, install as install_connectors
 from pydantic import BaseModel, Field, JsonValue
 
 STORE_DIRECTORY = Path("/var/lib/id42-work")
@@ -593,10 +609,14 @@ def issue_agent(authority: ActorAuthority) -> TrustedActor:
     ``id42-work approvals --resume`` calls this through ``WorkMcpServer.host_actor``.
     The operator (``OPERATOR_ID``) is sealed by that command, not here.
     """
+    grants = set(_AGENT_GRANTS)
+    grants.update(execution_grants())
+    if any(grant.startswith(("approve:", "reconcile:")) for grant in grants):
+        raise RuntimeError("the execution actor must not approve or reconcile its own work")
     return authority.issue(
         actor_id=ACTOR_ID,
         tenant_id=TENANT_ID,
-        grants=_AGENT_GRANTS,
+        grants=frozenset(grants),
         ttl=timedelta(minutes=5),
     )
 
@@ -676,8 +696,16 @@ def _works() -> tuple[tuple[Work, object], ...]:
     )
 
 
-def open_host() -> tuple[WorkRunner, ActorAuthority, _Closable]:
-    """Open the durable runner. The caller closes the storage."""
+def open_host(
+    *,
+    odoo_transport: object | None = None,
+    github_transport: object | None = None,
+) -> tuple[WorkRunner, ActorAuthority, _Closable]:
+    """Open the durable runner. The caller closes the storage.
+
+    ``odoo_transport`` and ``github_transport`` are test doubles. Production
+    passes neither, and a connector that is switched off ignores them.
+    """
     if storage_backend() == STORAGE_SQLITE:
         notes = notes_file(store_file())
     else:
@@ -688,10 +716,18 @@ def open_host() -> tuple[WorkRunner, ActorAuthority, _Closable]:
         registry.register(work, executor=executor)
     capabilities = CapabilityRegistry()
     capabilities.add(NoteStore(notes))
+    policies = _policies()
+    install_connectors(
+        registry,
+        capabilities,
+        policies,
+        odoo_transport=odoo_transport,
+        github_transport=github_transport,
+    )
     authority = open_authority(create=True)
     runner = WorkRunner(
         registry=registry,
-        policies=StaticPolicyResolver(_policies()),
+        policies=StaticPolicyResolver(policies),
         capabilities=capabilities,
         actor_authority=authority,
         storage=storage,
@@ -715,11 +751,22 @@ def _close_storage(storage: _Closable) -> None:
 
 
 def server() -> WorkMcpServer:
-    """Host factory. The sealed actor is issued here, not by the MCP client."""
+    """Host factory. The sealed actor is issued here, not by the MCP client.
+
+    Stdio keeps one process actor. ``credential_session_actor`` falls back to
+    ``issue`` when the transport has no header, and the server pins that
+    identity. An HTTP caller must present a credential this authority verifies.
+    """
     runner, authority, storage = open_host()
     atexit.register(_close_storage, storage)
+    atexit.register(close_providers)
 
     def issue() -> TrustedActor:
         return issue_agent(authority)
 
-    return WorkMcpServer(runner, authority=authority, issue_actor=issue)
+    return WorkMcpServer(
+        runner,
+        authority=authority,
+        issue_actor=issue,
+        session_actor=credential_session_actor(fallback=issue),
+    )

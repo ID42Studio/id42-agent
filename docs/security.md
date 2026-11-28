@@ -6,7 +6,7 @@ This phase is a personal agent on one machine. The defaults are tighter than ups
 
 | Control | Setting |
 |---|---|
-| Published ports | `127.0.0.1:8765` (WebUI) and `127.0.0.1:18790` (health) only |
+| Published ports | `127.0.0.1:8765` (WebUI) and `127.0.0.1:18790` (health). The optional operator UI adds `127.0.0.1:8767` only while profile `id42-work-web` is up |
 | Capabilities | `cap_drop: ALL`, then `CHOWN`, `SETGID`, `SETUID` |
 | Privilege gain | `no-new-privileges:true` |
 | Docker socket | not mounted |
@@ -14,6 +14,7 @@ This phase is a personal agent on one machine. The defaults are tighter than ups
 | Data | named volume `nanobot-data` at `/home/nanobot/.nanobot` |
 | ID42 Work store | named volume `id42-work-data` at `/var/lib/id42-work`, outside the workspace and outside any home directory. Holds the note file, the authority key, and the SQLite file |
 | Postgres | optional profile `postgres`. No host port. Credentials come from `.env`. Data volume `id42-postgres-data` |
+| Operator UI | optional profile `id42-work-web`. Same store and authority key. Token from `.env` or a mode `0600` file. The UI process binds `127.0.0.1`. A forwarder publishes the host port on loopback |
 | Process | upstream entrypoint starts as root, `chown`s the volume, then `setpriv` to uid 1000. It refuses to run the agent as root |
 | CPU / memory | 1 CPU, 1 GiB limit (same order of magnitude as upstream Compose) |
 
@@ -22,6 +23,8 @@ This phase is a personal agent on one machine. The defaults are tighter than ups
 The health handler is unauthenticated (`GET /health` in `nanobot/cli/gateway_runtime.py`). Upstream warns when it binds beyond loopback. Keep `18790` on `127.0.0.1`.
 
 The WebUI binds `0.0.0.0` **inside** the container so Docker's port map can reach it, and the host map is loopback-only. `channels.websocket.tokenIssueSecret` is required for that wildcard bind (`WebSocketConfig.wildcard_host_requires_auth`). The password is `NANOBOT_WEB_TOKEN` in `.env`, mode `0600`. Init does not print it. Upstream's own Compose publishes `8765` on all host interfaces. This file does not.
+
+The operator UI is separate from that WebUI. `id42-work web serve` refuses any bind that is not a loopback address, so the container runs it on `127.0.0.1:8768` and a forwarder accepts the published port. Compose maps that port to `127.0.0.1` on the host. Do not change the host side to `0.0.0.0`. The token is `ID42_WORK_WEB_TOKEN` or `ID42_WORK_WEB_TOKEN_FILE` on the `id42-work-web` service only. It is not passed as an argument, not written into `config.json`, and not printed. A file must be mode `0600` and must not be a symlink. Sign-in also needs actor id `id42-operator`. Pages require the session cookie and a matching origin.
 
 ## What the agent is allowed to do
 
@@ -42,7 +45,7 @@ Re-enabling `tools.exec.enable` gives the process a shell as uid 1000 inside the
 - The first-boot `config.json` contains the WebUI password and, when Telegram is on, the bot token. The volume is sensitive. `docker compose down` does not delete it. `docker compose down -v` does.
 - The ID42 Work SQLite file, the note log, and the authority key live on `id42-work-data`. The database holds execution inputs when SQLite is selected. The key file is mode `0600` and is what lets a later process trust an operator seal. It stays on that volume when Postgres is selected. `docker compose down -v` deletes that volume too. Re-enabling the shell tool lets uid 1000 read the store and the key, the same way it can read `config.json`.
 - Postgres is off unless you set `ID42_WORK_STORAGE=postgres` and start the `postgres` profile. The password lives in `.env` and, after the first init with the MCP server enabled, in `config.json` for the stdio child. The Postgres port is not published. `docker compose down -v` also deletes `id42-postgres-data`.
-- Doctor, init, and the operator scripts are written so those values are not printed. A failed `getMe` reports the HTTP status, not the request URL. Key rotation prints the new key id only. A failed Postgres check does not print the database URL.
+- Doctor, init, and the operator scripts are written so those values are not printed. A failed `getMe` reports the HTTP status, not the request URL. Key rotation prints the new key id only. A failed Postgres check does not print the database URL. The operator UI token is not printed and is not part of the gateway environment. Odoo and GitHub stay off unless their flags are true. Prefer `ODOO_API_KEY_FILE` and `ID42_WORK_GITHUB_TOKEN_FILE` (mode `0600`). An inline key or token is copied into `config.json` for the stdio child. The GitHub allow-list is `ID42_WORK_GITHUB_REPOSITORIES`. The registered GitHub works cannot merge, close, delete, or push. Odoo has no unlink, and `odoo.create` exists only when write models are set.
 - Do not put `.env` or the volume into a backup that other people can read. Backup tooling is out of scope here; the warning still applies.
 
 ## Ollama and Telegram
@@ -55,4 +58,4 @@ Cloud model providers are not configured. Adding one sends conversation content 
 
 ## What this does not claim
 
-Loopback binding protects a single-user host. It does not help if the host account is shared, if you later change the port maps to `0.0.0.0`, or if the model is instructed by untrusted text to use tools that are still enabled. There is no separate API service. Postgres is an optional profile and publishes no port. The ID42 Work server is a child process of the gateway. It does not approve work and it does not reconcile an uncertain call on behalf of the client. A person approves outside the server with `scripts/work-approve.sh`, which runs `id42-work approvals` as `id42-operator` and, on approve, resumes as `id42-agent`. The same operator id is used by `scripts/work-reconcile.sh`. That command seals only `reconcile:note` for a decision, and `id42-agent` cannot reconcile its own call. The server and those commands share the authority key file on `id42-work-data`, so a seal from one process verifies in the other. Turning the server on registers only the three built-in works. `note` does not write until that person approves.
+Loopback binding protects a single-user host. It does not help if the host account is shared, if you later change the port maps to `0.0.0.0`, or if the model is instructed by untrusted text to use tools that are still enabled. There is no separate API service. Postgres is an optional profile and publishes no port. The ID42 Work server is a child process of the gateway. It does not approve work and it does not reconcile an uncertain call on behalf of the client. A person approves outside the server with `scripts/work-approve.sh`, which runs `id42-work approvals` as `id42-operator` and, on approve, resumes as `id42-agent`. The same operator id is used by `scripts/work-reconcile.sh` and by the optional operator UI. That command seals only `reconcile:note` for a decision, and `id42-agent` cannot reconcile its own call. The server and those commands share the authority key file on `id42-work-data`, so a seal from one process verifies in the other. Turning the server on registers only the three built-in works. `note` does not write until that person approves.

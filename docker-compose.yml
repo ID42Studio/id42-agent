@@ -1,7 +1,7 @@
 # id42-agent.
 # Runtime: HKUDS/nanobot v0.4.2 at 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65.
 # There is no official published image. Compose builds the upstream Dockerfile,
-# then Dockerfile installs id42-work[mcp,postgres] into a separate virtualenv.
+# then Dockerfile installs id42-work[mcp,postgres,web] into a separate virtualenv.
 # nanobot is MIT licensed. id42-work and this repository's own files are Apache-2.0.
 # See NOTICE.
 
@@ -18,7 +18,9 @@ x-nanobot: &nanobot
       upstream: service:nanobot-upstream
     args:
       # Full commit. A branch name is not a pin. Keep in sync with Dockerfile.
-      ID42_WORK_REF: ${ID42_WORK_REF:-d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9}
+      ID42_WORK_REF: ${ID42_WORK_REF:-ae07623aa67c0b5d0535cb58f6a2e2b204736e50}
+      ID42_WORK_ODOO_REF: ${ID42_WORK_ODOO_REF:-3797544d8a3580657548d000110915578efe87c3}
+      ID42_WORK_GITHUB_REF: ${ID42_WORK_GITHUB_REF:-2e2a23d8f64d6c2313523bbf7ee24554fb3a4cb3}
   environment:
     TZ: ${TZ:-America/Sao_Paulo}
     NANOBOT_DOCKER_BOOTSTRAP: "1"
@@ -27,6 +29,24 @@ x-nanobot: &nanobot
     # and ID42_WORK_DATABASE_URL. The URL is a secret; scripts must not print it.
     ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
     ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+    # Connectors stay off until the flag is true. Secrets are empty here.
+    # Prefer a mode 0600 file over the inline secret. See docs/id42-work.md.
+    ID42_WORK_ODOO_ENABLED: ${ID42_WORK_ODOO_ENABLED:-false}
+    ODOO_URL: ${ODOO_URL:-}
+    ODOO_DB: ${ODOO_DB:-}
+    ODOO_USER: ${ODOO_USER:-}
+    ODOO_API_KEY: ${ODOO_API_KEY:-}
+    ODOO_API_KEY_FILE: ${ODOO_API_KEY_FILE:-}
+    ODOO_PROTOCOL: ${ODOO_PROTOCOL:-}
+    ODOO_TIMEOUT: ${ODOO_TIMEOUT:-}
+    ID42_WORK_ODOO_READ_MODELS: ${ID42_WORK_ODOO_READ_MODELS:-}
+    ID42_WORK_ODOO_WRITE_MODELS: ${ID42_WORK_ODOO_WRITE_MODELS:-}
+    ID42_WORK_ODOO_READ_FIELDS: ${ID42_WORK_ODOO_READ_FIELDS:-}
+    ID42_WORK_GITHUB_ENABLED: ${ID42_WORK_GITHUB_ENABLED:-false}
+    ID42_WORK_GITHUB_REPOSITORIES: ${ID42_WORK_GITHUB_REPOSITORIES:-}
+    GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ID42_WORK_GITHUB_TOKEN_FILE: ${ID42_WORK_GITHUB_TOKEN_FILE:-}
+    ID42_WORK_GITHUB_OPERATION_LOG: ${ID42_WORK_GITHUB_OPERATION_LOG:-}
   volumes:
     - nanobot-data:/home/nanobot/.nanobot
     # Notes and the authority key for the default factory, plus the SQLite
@@ -161,6 +181,64 @@ services:
       resources:
         limits:
           cpus: "1.0"
+          memory: 512M
+
+  # Opt-in operator UI for approvals and reconciliation. Same image, same
+  # factory, same id42-work-data volume and authority key as the gateway.
+  # id42-work binds 127.0.0.1. The entrypoint forwards the published port to
+  # that listener. The host map stays on loopback.
+  # Enable with: docker compose --profile id42-work-web up -d id42-work-web
+  id42-work-web:
+    <<: *nanobot
+    profiles:
+      - id42-work-web
+    entrypoint: ["/bin/sh", "/id42/web-entrypoint.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    # Replaces the gateway environment. The operator token stays on this
+    # service. The gateway process does not receive it.
+    environment:
+      ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
+      ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+      ID42_WORK_AUTHORITY_KEY_PATH: ${ID42_WORK_AUTHORITY_KEY_PATH:-}
+      ID42_WORK_WEB_TOKEN: ${ID42_WORK_WEB_TOKEN:-}
+      ID42_WORK_WEB_TOKEN_FILE: ${ID42_WORK_WEB_TOKEN_FILE:-}
+      ID42_WORK_ODOO_ENABLED: ${ID42_WORK_ODOO_ENABLED:-false}
+      ODOO_URL: ${ODOO_URL:-}
+      ODOO_DB: ${ODOO_DB:-}
+      ODOO_USER: ${ODOO_USER:-}
+      ODOO_API_KEY: ${ODOO_API_KEY:-}
+      ODOO_API_KEY_FILE: ${ODOO_API_KEY_FILE:-}
+      ODOO_PROTOCOL: ${ODOO_PROTOCOL:-}
+      ODOO_TIMEOUT: ${ODOO_TIMEOUT:-}
+      ID42_WORK_ODOO_READ_MODELS: ${ID42_WORK_ODOO_READ_MODELS:-}
+      ID42_WORK_ODOO_WRITE_MODELS: ${ID42_WORK_ODOO_WRITE_MODELS:-}
+      ID42_WORK_ODOO_READ_FIELDS: ${ID42_WORK_ODOO_READ_FIELDS:-}
+      ID42_WORK_GITHUB_ENABLED: ${ID42_WORK_GITHUB_ENABLED:-false}
+      ID42_WORK_GITHUB_REPOSITORIES: ${ID42_WORK_GITHUB_REPOSITORIES:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      ID42_WORK_GITHUB_TOKEN_FILE: ${ID42_WORK_GITHUB_TOKEN_FILE:-}
+      ID42_WORK_GITHUB_OPERATION_LOG: ${ID42_WORK_GITHUB_OPERATION_LOG:-}
+    volumes:
+      - id42-work-data:/var/lib/id42-work
+      - ./docker/web-entrypoint.sh:/id42/web-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:${ID42_WORK_WEB_PUBLISH_PORT:-8767}:8767"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8767/login"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
           memory: 512M
 
 volumes:
