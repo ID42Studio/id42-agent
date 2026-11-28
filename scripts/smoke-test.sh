@@ -837,13 +837,24 @@ class Response:
         self.body = body
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the status from / and from sign-in. Both answer 303."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def request(method, path, *, headers=None, data=None):
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with _OPENER.open(req, timeout=15) as response:
             return Response(response.status, response.headers, response.read())
     except urllib.error.HTTPError as exc:
-        return Response(exc.code, exc.headers, exc.read())
+        body = exc.read() if exc.fp is not None else b""
+        return Response(exc.code, exc.headers, body)
 
 
 anonymous = request("GET", "/")
