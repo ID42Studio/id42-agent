@@ -12,3 +12,10 @@
 - Doctor reports the active backend and checks that it opens. The database URL is not printed.
 - The smoke test still covers SQLite, and also approves one note across processes and
   reconciles one uncertain note on the Postgres profile.
+- Smoke coverage for process death during a governed note append, on SQLite and on Postgres.
+  `SIGKILL` during `notes.append` leaves the execution `RUNNING` and the journal `IN_FLIGHT`.
+  Resume probes the note file: `APPLIED` does not append again, and `NOT_APPLIED` retries
+  the same operation id once after a new approval. An unreadable note file becomes
+  `UNCERTAIN`, and `scripts/work-reconcile.sh applied` or `not-applied` resolves it.
+  `SIGKILL` during validation leaves `VALIDATING` with a `SUCCEEDED` journal. Resume
+  finishes it without calling `notes.append` again.

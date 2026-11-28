@@ -27,7 +27,7 @@ nanobot is MIT licensed (see `NOTICE`). Original files in this repository are Ap
 - Shell tool off, workspace restriction on
 - `id42-work` on `PATH`. The MCP server is off until `ID42_WORK_ENABLED=true`, then it is a stdio child of the gateway. No extra published port. The default factory stores executions in SQLite and registers `echo`, `note`, and `note.list`. `ID42_WORK_STORAGE=postgres` with the `postgres` profile uses Postgres instead. The authority key stays on `id42-work-data`
 - `scripts/work-approve.sh` runs `id42-work approvals` for that factory. `approve` resumes the execution as the host actor
-- `scripts/work-reconcile.sh` runs `id42-work reconcile` for that factory. The note provider probes an uncertain append. The operator can abandon a call the file cannot prove
+- `scripts/work-reconcile.sh` runs `id42-work reconcile` for that factory. The note provider probes an uncertain append. The operator can mark it applied, not applied, or abandon it
 - The factory, the approval command, and the reconcile command share one HMAC key file on `id42-work-data`. `scripts/work-rotate-key.sh` retires the current key and prints only the new key id
 - `nanobot-cli` under the `cli` profile (`status`, and any other nanobot command)
 - Optional `ollama` service under the `ollama` profile
