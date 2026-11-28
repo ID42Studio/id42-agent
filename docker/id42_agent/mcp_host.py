@@ -4,7 +4,8 @@ The process that runs the command is the host. It registers three works and
 stores executions outside the agent workspace and outside any home directory.
 ``ID42_WORK_STORAGE`` selects the backend. Empty or ``sqlite`` opens
 ``SqliteStorage`` (the default). ``postgres`` opens ``PostgresStorage`` from
-the ``postgres`` extra, using ``ID42_WORK_DATABASE_URL``. The authority key
+the ``postgres`` extra, using ``ID42_WORK_DATABASE_URL`` when that variable is
+set, otherwise the single line in ``ID42_WORK_DATABASE_URL_FILE``. The authority key
 file stays on the data volume either way:
 
 - ``echo`` returns its input. No capability, no approval.
@@ -74,6 +75,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from pathlib import Path
@@ -112,6 +114,8 @@ STORAGE_SQLITE = "sqlite"
 STORAGE_POSTGRES = "postgres"
 _STORAGE_ENV = "ID42_WORK_STORAGE"
 _DATABASE_ENV = "ID42_WORK_DATABASE_URL"
+_DATABASE_FILE_ENV = "ID42_WORK_DATABASE_URL_FILE"
+_MAX_SECRET_BYTES = 8192
 _DSN_USERINFO = re.compile(r"://[^/\s@]*:[^/\s@]*@")
 _DSN_PASSWORD = re.compile(r"(?i)\bpassword\s*=\s*('[^']*'|\"[^\"]*\"|\S+)")
 # One file for the MCP server and for `id42-work approvals` / `reconcile`.
@@ -428,19 +432,80 @@ def _database_url_error(value: str) -> str | None:
     return None
 
 
+def _read_private_secret(path: Path) -> str:
+    """Read one line from a regular mode 0600 file owned by this user.
+
+    The message does not include the path's contents. A symlink is refused.
+    """
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise RuntimeError(f"{_DATABASE_FILE_ENV} must be an absolute file path")
+    _reject_home(path, f"{_DATABASE_FILE_ENV} must not live under /home or /root")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise RuntimeError(f"{_DATABASE_FILE_ENV} cannot be opened") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f"{_DATABASE_FILE_ENV} must be a regular file")
+        if info.st_mode & 0o077:
+            raise RuntimeError(f"{_DATABASE_FILE_ENV} must be mode 0600")
+        if info.st_uid != os.getuid():
+            raise RuntimeError(f"{_DATABASE_FILE_ENV} must be owned by the current user")
+        raw = os.read(descriptor, _MAX_SECRET_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > _MAX_SECRET_BYTES:
+        raise RuntimeError(f"{_DATABASE_FILE_ENV} is too long")
+    text = raw.decode("utf-8")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text or "\n" in text or "\r" in text:
+        raise RuntimeError(f"{_DATABASE_FILE_ENV} must be a single line")
+    return text
+
+
 def database_url() -> str:
-    """Postgres target from the environment. The value is not logged."""
+    """Postgres target. An inline URL wins. Otherwise the private file is read.
+
+    The value is not logged. Operator scripts keep the URL in the process
+    environment. The stdio child receives only ``ID42_WORK_DATABASE_URL_FILE``.
+    """
     raw = os.environ.get(_DATABASE_ENV, "").strip()
+    if not raw:
+        file_raw = os.environ.get(_DATABASE_FILE_ENV, "").strip()
+        if not file_raw:
+            raise RuntimeError(
+                f"{_DATABASE_ENV} is required when {_STORAGE_ENV}=postgres"
+            )
+        raw = _read_private_secret(Path(file_raw))
     error = _database_url_error(raw)
     if error:
         raise RuntimeError(error)
     return raw
 
 
-def _public_storage_error(exc: BaseException) -> str:
+def _database_url_for_redaction() -> str:
+    raw = os.environ.get(_DATABASE_ENV, "").strip()
+    if raw:
+        return raw
+    file_raw = os.environ.get(_DATABASE_FILE_ENV, "").strip()
+    if not file_raw:
+        return ""
+    try:
+        return _read_private_secret(Path(file_raw))
+    except RuntimeError:
+        return ""
+
+
+def _public_storage_error(exc: BaseException, url: str = "") -> str:
     """Describe a storage failure without the URL or its password."""
     text = str(exc)
-    url = os.environ.get(_DATABASE_ENV, "").strip()
+    if not url:
+        url = _database_url_for_redaction()
     if url:
         text = text.replace(url, "[redacted]")
         password = urlparse(url).password if "://" in url else None
@@ -465,9 +530,7 @@ def _prepare_directory(directory: Path) -> None:
 
 
 def _open_postgres() -> _Closable:
-    error = _database_url_error(os.environ.get(_DATABASE_ENV, "").strip())
-    if error:
-        raise RuntimeError(error)
+    url = database_url()
     try:
         from id42_work.storage.postgres import PostgresStorage
     except ImportError as exc:
@@ -475,9 +538,9 @@ def _open_postgres() -> _Closable:
             "postgres storage needs id42-work[postgres] in /opt/id42-work/venv"
         ) from exc
     try:
-        return PostgresStorage(database_url(), timeout=_POSTGRES_TIMEOUT_SECONDS)
+        return PostgresStorage(url, timeout=_POSTGRES_TIMEOUT_SECONDS)
     except StorageError as exc:
-        raise RuntimeError(_public_storage_error(exc)) from None
+        raise RuntimeError(_public_storage_error(exc, url)) from None
 
 
 def open_storage() -> _Closable:

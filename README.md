@@ -105,4 +105,8 @@ Changing `OLLAMA_MODEL`, the Ollama URL, or the Telegram token in `.env` after t
 
 ## Security sketch
 
-Ports are published on loopback only. The container drops all capabilities except `CHOWN`, `SETGID`, and `SETUID`, which the upstream entrypoint needs to fix volume ownership and drop to uid 1000. `no-new-privileges` is set. The Docker socket and the host home directory are not mounted. The health route is unauthenticated, which is why it stays on loopback.
+Ports are published on loopback only. The gateway and the operator UI are not on the Compose default network, so a container attached only to that network cannot open them. The container drops all capabilities except `CHOWN`, `SETGID`, and `SETUID`, which the upstream entrypoint needs to fix volume ownership and drop to uid 1000. `no-new-privileges` is set. The Docker socket and the host home directory are not mounted. The health route is unauthenticated, which is why it stays on loopback.
+
+The nanobot WebUI on `127.0.0.1:8765` stays on. It requires `NANOBOT_WEB_TOKEN`. Chat tools that go through `id42-work` still wait for approval. The WebUI can also change gateway settings, including turning the shell tool back on. That is an upstream control plane on the same port, and this distribution does not remove it. See [Security](docs/security.md).
+
+A new `config.json` does not contain the WebUI password, the Telegram token, the database URL, or connector secrets. Those nanobot fields are `${NANOBOT_WEB_TOKEN}` and `${TELEGRAM_BOT_TOKEN}`. Database and connector secrets are mode `0600` files. Prefer `*_FILE` in `.env`. Doctor warns when a secret is still inline.

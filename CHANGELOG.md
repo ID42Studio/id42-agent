@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- The nanobot WebUI stays enabled and still requires `NANOBOT_WEB_TOKEN`. The gateway is on the `id42-store` network, not the Compose default network. A container on the default network cannot open port 8765. The host map stays `127.0.0.1:8765`. Governed `id42-work` calls from chat still wait for approval. An authenticated WebUI session can still change upstream settings, including `tools.exec.enable`.
+- The operator UI forwarder listens only on the `id42-operator` network. `id42-work-web-publish` is the container published on `127.0.0.1:8767`. The application container publishes no host port. That network is not internal, because Docker does not publish a host port from an internal network. Start it with `docker compose --profile id42-work-web up -d id42-work-web-publish`.
+- A new `config.json` stores `${NANOBOT_WEB_TOKEN}`, `${TELEGRAM_BOT_TOKEN}`, and file paths for the Postgres URL, the Odoo key, and the GitHub token. Inline values are written to mode `0600` files under `/var/lib/id42-work/secrets/` at startup when no `*_FILE` is set. Doctor warns about inline secrets and when `config.json` still contains one.
+
 ### Added
 
 - id42-work is pinned at `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`. The default factory passes `session_actor` so stdio keeps one sealed actor for the process, and HTTP sessions present a credential the authority verifies. `list_works` and `list_executions` are paged.

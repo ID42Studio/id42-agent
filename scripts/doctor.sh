@@ -46,6 +46,11 @@ if ! python3 "$CONFIG_PY" summary --env-file "$ENV_FILE"; then
   bad ".env could not be parsed"
 fi
 
+while IFS= read -r warning; do
+  [[ -z "$warning" ]] && continue
+  echo "WARN: $warning"
+done < <(python3 "$CONFIG_PY" secret-warnings --env-file "$ENV_FILE")
+
 compose_config=$(mktemp)
 if ! "${COMPOSE[@]}" config --format json >"$compose_config"; then
   bad "docker compose config rejected docker-compose.yml"
@@ -157,6 +162,27 @@ except RuntimeError as exc:
 print(f"store-ok backend={backend} schema={version}")
 
 config_path = Path("/home/nanobot/.nanobot/config.json")
+names = []
+if config_path.is_file():
+    text = config_path.read_text(encoding="utf-8", errors="replace")
+    for name in (
+        "NANOBOT_WEB_TOKEN",
+        "TELEGRAM_BOT_TOKEN",
+        "ID42_WORK_DATABASE_URL",
+        "ID42_POSTGRES_PASSWORD",
+        "ODOO_API_KEY",
+        "GITHUB_TOKEN",
+        "ID42_WORK_WEB_TOKEN",
+    ):
+        value = os.environ.get(name, "").strip()
+        if len(value) >= 8 and value in text:
+            names.append(name)
+    if names:
+        print("config-secrets-names=" + ",".join(names))
+    else:
+        print("config-secrets-clean")
+else:
+    print("config-secrets-absent")
 if not config_path.is_file():
     print("storage-config-absent")
     raise SystemExit(0)
@@ -170,16 +196,25 @@ if not isinstance(server, dict):
 extra = server.get("env") if isinstance(server.get("env"), dict) else {}
 configured = extra.get("ID42_WORK_STORAGE", "")
 configured_url = extra.get("ID42_WORK_DATABASE_URL", "")
-if not isinstance(configured, str) or not isinstance(configured_url, str):
+configured_file = extra.get("ID42_WORK_DATABASE_URL_FILE", "")
+if (
+    not isinstance(configured, str)
+    or not isinstance(configured_url, str)
+    or not isinstance(configured_file, str)
+):
     print("store-backend: config storage settings are not strings")
     raise SystemExit(1)
 configured = configured.strip().lower()
 configured_url = configured_url.strip()
+configured_file = configured_file.strip()
 expected_url = os.environ.get("ID42_WORK_DATABASE_URL", "").strip() if backend == "postgres" else ""
+file_ok = configured_file.startswith("/") and ".." not in configured_file.split("/")
 if backend == "sqlite":
-    aligned = configured in {"", "sqlite"} and not configured_url
+    aligned = configured in {"", "sqlite"} and not configured_url and not configured_file
 else:
-    aligned = configured == "postgres" and bool(configured_url) and configured_url == expected_url
+    legacy = bool(configured_url) and configured_url == expected_url
+    filed = file_ok and not configured_url
+    aligned = configured == "postgres" and (legacy or filed)
 if not aligned:
     print("store-backend: config.json storage does not match ID42_WORK_STORAGE")
     raise SystemExit(1)
@@ -203,6 +238,12 @@ then
     good "id42-work storage config has no MCP server env to compare"
   else
     bad "id42-work storage config check did not report a result"
+  fi
+  if grep -q '^config-secrets-names=' "$store_out"; then
+    secret_names=$(sed -n 's/^config-secrets-names=//p' "$store_out")
+    echo "WARN: config.json contains inline values for ${secret_names}; prefer *_FILE and render again"
+  elif grep -qx 'config-secrets-clean' "$store_out"; then
+    good "config.json does not contain inline secret values"
   fi
 else
   sed -i 's/\r$//' "$store_out" || true
@@ -423,11 +464,19 @@ if [[ -n "$container_id" ]]; then
   rm -f "$help_out"
 
   web_id=$("${COMPOSE[@]}" --profile id42-work-web ps -q id42-work-web 2>/dev/null || true)
-  if [[ -z "$web_id" ]]; then
+  publish_id=$("${COMPOSE[@]}" --profile id42-work-web ps -q id42-work-web-publish 2>/dev/null || true)
+  if [[ -z "$web_id" && -z "$publish_id" ]]; then
     good "id42-work operator UI is not running"
+  elif [[ -z "$publish_id" ]]; then
+    bad "id42-work operator UI is running without the loopback publisher"
   else
-    web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
-    if [[ "$web_bind" == "127.0.0.1" ]]; then
+    web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$publish_id")
+    if [[ -n "$web_id" ]]; then
+      web_published=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}published{{end}}{{end}}' "$web_id")
+    else
+      web_published=missing
+    fi
+    if [[ "$web_bind" == "127.0.0.1" && -z "$web_published" ]]; then
       good "id42-work operator UI is published on 127.0.0.1"
     else
       bad "id42-work operator UI is not published on 127.0.0.1"
@@ -531,8 +580,14 @@ allow = telegram.get("allowFrom") or []
 if not isinstance(allow, list) or not allow or "*" in allow:
     print("channels.telegram.allowFrom is not an explicit allowlist", file=sys.stderr)
     sys.exit(1)
-token = telegram.get("token") or ""
-if not isinstance(token, str) or not token.strip():
+import os, re
+raw = telegram.get("token") or ""
+if not isinstance(raw, str) or not raw.strip():
+    print("channels.telegram.token is empty", file=sys.stderr)
+    sys.exit(1)
+match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", raw.strip())
+token = os.environ.get(match.group(1), "") if match else raw
+if not token.strip():
     print("channels.telegram.token is empty", file=sys.stderr)
     sys.exit(1)
 request = urllib.request.Request(f"https://api.telegram.org/bot{token}/getMe")

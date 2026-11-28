@@ -29,6 +29,7 @@ x-nanobot: &nanobot
     # and ID42_WORK_DATABASE_URL. The URL is a secret; scripts must not print it.
     ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
     ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+    ID42_WORK_DATABASE_URL_FILE: ${ID42_WORK_DATABASE_URL_FILE:-}
     # Connectors stay off until the flag is true. Secrets are empty here.
     # Prefer a mode 0600 file over the inline secret. See docs/id42-work.md.
     ID42_WORK_ODOO_ENABLED: ${ID42_WORK_ODOO_ENABLED:-false}
@@ -95,6 +96,9 @@ services:
 
   nanobot-gateway:
     <<: *nanobot
+    # Off the default network so another container there cannot reach 8765.
+    networks:
+      - id42-store
     # Optional. With the postgres profile active, wait until Postgres accepts
     # connections. Without that profile the dependency is skipped.
     depends_on:
@@ -123,6 +127,8 @@ services:
 
   nanobot-cli:
     <<: *nanobot
+    networks:
+      - id42-store
     profiles:
       - cli
     command: ["status"]
@@ -134,6 +140,8 @@ services:
   # Enable with: docker compose --profile ollama up -d
   # Then set OLLAMA_BASE_URL=http://ollama:11434/v1 before the first init.
   ollama:
+    networks:
+      - id42-store
     profiles:
       - ollama
     image: ollama/ollama:0.40.18@sha256:1cabd20e1762a7a8444bf4a7110b346d923cd77ab6c97c984434140638c913ec
@@ -159,6 +167,8 @@ services:
   # This service publishes no host port. The authority key stays on
   # id42-work-data, not in this database.
   postgres:
+    networks:
+      - id42-store
     profiles:
       - postgres
     image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
@@ -185,9 +195,10 @@ services:
 
   # Opt-in operator UI for approvals and reconciliation. Same image, same
   # factory, same id42-work-data volume and authority key as the gateway.
-  # id42-work binds 127.0.0.1. The entrypoint forwards the published port to
-  # that listener. The host map stays on loopback.
-  # Enable with: docker compose --profile id42-work-web up -d id42-work-web
+  # id42-work binds 127.0.0.1:8768. The forwarder in this container listens
+  # only on the operator network. id42-work-web-publish is the host port.
+  # Enable with:
+  #   docker compose --profile id42-work-web up -d id42-work-web-publish
   id42-work-web:
     <<: *nanobot
     profiles:
@@ -200,9 +211,14 @@ services:
     restart: unless-stopped
     # Replaces the gateway environment. The operator token stays on this
     # service. The gateway process does not receive it.
+    networks:
+      - id42-store
+      - id42-operator
     environment:
+      ID42_OPERATOR_SUBNET: ${ID42_OPERATOR_SUBNET:-10.42.76.0/24}
       ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
       ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
+      ID42_WORK_DATABASE_URL_FILE: ${ID42_WORK_DATABASE_URL_FILE:-}
       ID42_WORK_AUTHORITY_KEY_PATH: ${ID42_WORK_AUTHORITY_KEY_PATH:-}
       ID42_WORK_WEB_TOKEN: ${ID42_WORK_WEB_TOKEN:-}
       ID42_WORK_WEB_TOKEN_FILE: ${ID42_WORK_WEB_TOKEN_FILE:-}
@@ -225,10 +241,8 @@ services:
     volumes:
       - id42-work-data:/var/lib/id42-work
       - ./docker/web-entrypoint.sh:/id42/web-entrypoint.sh:ro
-    ports:
-      - "127.0.0.1:${ID42_WORK_WEB_PUBLISH_PORT:-8767}:8767"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8767/login"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8768/login"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -241,8 +255,62 @@ services:
           cpus: "0.5"
           memory: 512M
 
+  # Host loopback publisher for the operator UI. One network, no secrets,
+  # no data volume. Docker publishes 8767 on 127.0.0.1. The forwarder in
+  # id42-work-web does not listen on the store network.
+  id42-work-web-publish:
+    <<: *nanobot
+    profiles:
+      - id42-work-web
+    entrypoint: ["/bin/sh", "/id42/web-publish-entrypoint.sh"]
+    networks:
+      - id42-operator
+    depends_on:
+      id42-work-web:
+        condition: service_healthy
+    environment:
+      ID42_FRONT_UPSTREAM: id42-work-web
+      ID42_FRONT_UPSTREAM_PORT: "8767"
+      ID42_FRONT_LISTEN_PORT: "8767"
+    volumes:
+      - ./docker/web-publish-entrypoint.sh:/id42/web-publish-entrypoint.sh:ro
+    ports:
+      - "127.0.0.1:${ID42_WORK_WEB_PUBLISH_PORT:-8767}:8767"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8767/login"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
 volumes:
   nanobot-data:
   id42-work-data:
   id42-postgres-data:
   ollama-data:
+
+networks:
+  # Gateway, Postgres, Ollama, and the operator UI. Not the default network,
+  # so a container attached only to the project default cannot route here.
+  id42-store: {}
+  # Operator UI forwarder and its host publisher. This bridge is not the
+  # default network, so a container there cannot route to port 8767.
+  # It is not internal: Docker does not publish a host port on an internal
+  # network, and the host map is 127.0.0.1.
+  id42-operator:
+    ipam:
+      config:
+        - subnet: ${ID42_OPERATOR_SUBNET:-10.42.76.0/24}

@@ -275,7 +275,9 @@ assert doc["tools"]["restrictToWorkspace"] is True
 assert doc["tools"]["exec"]["enable"] is False
 assert doc["providers"]["ollama"]["apiBase"].endswith("/v1")
 assert doc["modelPresets"]["primary"]["model"] == "smoke-model"
-assert doc["channels"]["websocket"]["tokenIssueSecret"] == "smoke-web-token-do-not-leak"
+assert doc["channels"]["websocket"]["tokenIssueSecret"] == "${NANOBOT_WEB_TOKEN}"
+assert doc["tools"]["webuiAllowRemotePackageInstall"] is False
+assert "smoke-web-token-do-not-leak" not in json.dumps(doc)
 assert "telegram" not in doc["channels"]
 assert "mcpServers" not in doc["tools"]
 print("rendered config matches the default contract")
@@ -447,8 +449,13 @@ document = json.loads(rendered.read_text(encoding="utf-8"))
 server = document["tools"]["mcpServers"]["id42-work"]
 if server["env"].get("ID42_WORK_STORAGE") != "postgres":
     raise SystemExit("postgres storage was not written for the MCP child")
-if server["env"].get("ID42_WORK_DATABASE_URL") != url:
-    raise SystemExit("postgres URL was not written for the MCP child")
+if server["env"].get("ID42_WORK_DATABASE_URL_FILE") != "/var/lib/id42-work/secrets/database.url":
+    raise SystemExit("postgres file path was not written for the MCP child")
+if "ID42_WORK_DATABASE_URL" in server["env"]:
+    raise SystemExit("postgres URL was written into config")
+rendered_text = rendered.read_text(encoding="utf-8")
+if password in rendered_text or url in rendered_text:
+    raise SystemExit("rendered config contained the database secret")
 summary = json.loads(summary_buffer.getvalue())
 if summary["env"]["ID42_WORK_STORAGE"] != "postgres":
     raise SystemExit("summary did not report postgres")
@@ -463,8 +470,20 @@ sqlite_path = workdir / "sqlite-ignores-url.env"
 sqlite_path.write_text("".join(f"{key}={value}\n" for key, value in sqlite_env.items()), encoding="utf-8")
 sqlite_doc = mod.build_config(mod.load_env_file(sqlite_path))
 sqlite_server = sqlite_doc["tools"]["mcpServers"]["id42-work"]
-if "ID42_WORK_STORAGE" in sqlite_server["env"] or "ID42_WORK_DATABASE_URL" in sqlite_server["env"]:
+if (
+    "ID42_WORK_STORAGE" in sqlite_server["env"]
+    or "ID42_WORK_DATABASE_URL" in sqlite_server["env"]
+    or "ID42_WORK_DATABASE_URL_FILE" in sqlite_server["env"]
+):
     raise SystemExit("sqlite config copied the database URL")
+file_env = dict(postgres_env)
+file_env["ID42_WORK_DATABASE_URL_FILE"] = "/var/lib/id42-work/custom-database.url"
+file_doc = mod.build_config(file_env)
+file_server = file_doc["tools"]["mcpServers"]["id42-work"]["env"]
+if file_server.get("ID42_WORK_DATABASE_URL_FILE") != "/var/lib/id42-work/custom-database.url":
+    raise SystemExit("custom database file path was not kept")
+if "ID42_WORK_DATABASE_URL" in file_server or url in json.dumps(file_doc) or password in json.dumps(file_doc):
+    raise SystemExit("custom database file render copied the URL")
 print("postgres storage is passed to the MCP child and is not printed")
 PY
 
@@ -511,6 +530,37 @@ assert server_env["ODOO_API_KEY_FILE"] == "/var/lib/id42-work/odoo.key"
 assert "ODOO_API_KEY" not in server_env
 assert "GITHUB_TOKEN" not in server_env
 assert "odoo.search" not in json.dumps(server_env)
+inline = dict(enabled)
+inline["ODOO_API_KEY"] = "smoke-odoo-key-do-not-leak"
+del inline["ODOO_API_KEY_FILE"]
+inline["GITHUB_TOKEN"] = "smoke-github-token-do-not-leak"
+del inline["ID42_WORK_GITHUB_TOKEN_FILE"]
+inline["TELEGRAM_ENABLED"] = "true"
+inline["TELEGRAM_BOT_TOKEN"] = "smoke-telegram-token-do-not-leak"
+inline["TELEGRAM_ALLOWED_USERS"] = "123456789"
+inline["ID42_WORK_WEB_TOKEN"] = "smoke-operator-token-do-not-leak"
+inline_doc = mod.build_config(inline)
+inline_text = json.dumps(inline_doc)
+inline_env = inline_doc["tools"]["mcpServers"]["id42-work"]["env"]
+for secret in (
+    "smoke-odoo-key-do-not-leak",
+    "smoke-github-token-do-not-leak",
+    "smoke-telegram-token-do-not-leak",
+    "smoke-web-token-do-not-leak",
+    "smoke-operator-token-do-not-leak",
+):
+    if secret in inline_text:
+        raise SystemExit("rendered config contained an inline secret")
+if inline_doc["channels"]["telegram"]["token"] != "${TELEGRAM_BOT_TOKEN}":
+    raise SystemExit("telegram token was not stored as an env reference")
+if inline_doc["channels"]["websocket"]["tokenIssueSecret"] != "${NANOBOT_WEB_TOKEN}":
+    raise SystemExit("web token was not stored as an env reference")
+if inline_env.get("ODOO_API_KEY_FILE") != "/var/lib/id42-work/secrets/odoo.key":
+    raise SystemExit("inline odoo key was not replaced with a file path")
+if inline_env.get("ID42_WORK_GITHUB_TOKEN_FILE") != "/var/lib/id42-work/secrets/github.token":
+    raise SystemExit("inline github token was not replaced with a file path")
+if "ODOO_API_KEY" in inline_env or "GITHUB_TOKEN" in inline_env or "ID42_WORK_WEB_TOKEN" in inline_text:
+    raise SystemExit("inline connector secret was copied into config")
 both = dict(enabled)
 both["GITHUB_TOKEN"] = "smoke-github-token-do-not-leak"
 try:
@@ -532,6 +582,66 @@ else:
 if "smoke-github-token-do-not-leak" in json.dumps(doc):
     raise SystemExit("rendered config contained the github token")
 print("connector settings stay out until enabled and do not print secrets")
+PY
+
+python3 - "$ROOT/docker" <<'PY'
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from id42_agent.materialize import materialize
+
+secret = "smoke-db-password-do-not-leak"
+url = f"postgresql://id42:{secret}@postgres:5432/id42_work"
+odoo = "smoke-odoo-key-do-not-leak"
+github = "smoke-github-token-do-not-leak"
+with tempfile.TemporaryDirectory() as raw:
+    directory = Path(raw)
+    env = {
+        "ID42_WORK_DATABASE_URL": url,
+        "ODOO_API_KEY": odoo,
+        "GITHUB_TOKEN": github,
+    }
+    written = materialize(env, directory=directory)
+    if {path.name for path in written} != {"database.url", "odoo.key", "github.token"}:
+        raise SystemExit("materialize did not write the three default files")
+    for name, expected in (
+        ("database.url", url),
+        ("odoo.key", odoo),
+        ("github.token", github),
+    ):
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise SystemExit("secret file is not a regular file")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode != 0o600:
+            raise SystemExit(f"secret file mode is {mode:03o}")
+        if path.stat().st_uid != os.getuid():
+            raise SystemExit("secret file owner is not the current user")
+        if path.read_text(encoding="utf-8").strip() != expected:
+            raise SystemExit("secret file contents do not match")
+    custom = directory / "custom.url"
+    custom.write_text("keep\n", encoding="utf-8")
+    os.chmod(custom, 0o600)
+    kept = dict(env)
+    kept["ID42_WORK_DATABASE_URL_FILE"] = str(custom)
+    materialize(kept, directory=directory)
+    if custom.read_text(encoding="utf-8") != "keep\n":
+        raise SystemExit("materialize overwrote a supplied database file")
+    database = directory / "database.url"
+    database.unlink()
+    database.symlink_to(custom)
+    try:
+        materialize(env, directory=directory)
+    except SystemExit as exc:
+        if "symlink" not in str(exc):
+            raise
+    else:
+        raise SystemExit("materialize followed a symlink")
+print("inline secrets are stored as mode 0600 files")
 PY
 
 echo "== compose config =="
@@ -645,6 +755,31 @@ echo "OK health endpoint is ready"
 container=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" ps -q nanobot-gateway)
 [[ -n "$container" ]] || id42_die "gateway container id is empty"
+
+echo "== default network cannot reach the WebUI =="
+ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" up -d nanobot-upstream >/dev/null
+gw_ip=$(python3 - "$container" "${PROJECT}_id42-store" <<'PY'
+import json, subprocess, sys
+info = json.loads(subprocess.check_output(["docker", "inspect", sys.argv[1]], text=True))[0]
+entry = (info.get("NetworkSettings") or {}).get("Networks", {}).get(sys.argv[2]) or {}
+print(entry.get("IPAddress") or "")
+PY
+)
+[[ -n "$gw_ip" ]] || id42_die "gateway has no address on the store network"
+webui_probe=$(docker run --rm --network "${PROJECT}_default" \
+  --entrypoint /app/.venv/bin/python id42-agent-nanobot:0.4.2 -c \
+  'import socket,sys
+s=socket.socket(); s.settimeout(3)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except OSError:
+    print("blocked")
+else:
+    print("connected")' "$gw_ip" 8765)
+[[ "$webui_probe" == "blocked" ]] || id42_die "a container on the default network reached the WebUI"
+python3 -c 'import socket; s=socket.create_connection(("127.0.0.1", 8765), 5); s.close()'
+echo "OK WebUI accepts the host loopback map and refuses the default network"
 
 python3 - "$container" "$ROOT/scripts/lib/baseline.py" <<'PY'
 import importlib.util, json, subprocess, sys
@@ -787,14 +922,18 @@ web_token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
 printf 'ID42_WORK_WEB_TOKEN=%s\nID42_WORK_WEB_PUBLISH_PORT=%s\n' "$web_token" "$web_port" >>"$ENV_FILE"
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
-  up -d id42-work-web
+  up -d id42-work-web-publish
 web_id=""
+publish_id=""
 web_health=""
 for _ in $(seq 1 40); do
   web_id=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
     docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
     ps -q id42-work-web || true)
-  web_health=$(docker inspect --format '{{.State.Health.Status}}' "$web_id" 2>/dev/null || true)
+  publish_id=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+    docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
+    ps -q id42-work-web-publish || true)
+  web_health=$(docker inspect --format '{{.State.Health.Status}}' "$publish_id" 2>/dev/null || true)
   if [[ "$web_health" == "healthy" ]]; then
     break
   fi
@@ -813,8 +952,10 @@ if [[ "$web_health" != "healthy" ]]; then
   tail -n 80 "$WORKDIR/web.log" >&2 || true
   id42_die "operator UI did not become healthy"
 fi
-web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$web_id")
-[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1"
+web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$publish_id")
+[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1 (bind=${web_bind:-empty})"
+web_published=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}published{{end}}{{end}}' "$web_id")
+[[ -z "$web_published" ]] || id42_die "operator UI application container publishes a host port"
 ID42_WORK_WEB_TOKEN=$web_token ID42_WORK_WEB_URL="http://127.0.0.1:${web_port}" \
   python3 - "$WORKDIR/web-ui.out" <<'PY'
 import os
@@ -921,9 +1062,56 @@ if grep -q "$web_token" "$WORKDIR/web-ui.out"; then
 fi
 grep -q "home=pending-note" "$WORKDIR/web-ui.out"
 capture_web_logs
+
+network_ip() {
+  python3 - "$1" "$2" <<'PY'
+import json, subprocess, sys
+info = json.loads(subprocess.check_output(["docker", "inspect", sys.argv[1]], text=True))[0]
+entry = (info.get("NetworkSettings") or {}).get("Networks", {}).get(sys.argv[2]) or {}
+print(entry.get("IPAddress") or "")
+PY
+}
+tcp_probe() {
+  docker run --rm --network "$1" --entrypoint /app/.venv/bin/python \
+    id42-agent-nanobot:0.4.2 -c \
+    'import socket,sys
+s=socket.socket(); s.settimeout(3)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except OSError:
+    print("blocked")
+else:
+    print("connected")' "$2" "$3"
+}
+web_store_ip=$(network_ip "$web_id" "${PROJECT}_id42-store")
+publish_ip=$(network_ip "$publish_id" "${PROJECT}_id42-operator")
+[[ -n "$web_store_ip" && -n "$publish_ip" ]] || id42_die "operator UI addresses are missing"
+[[ "$(tcp_probe "${PROJECT}_default" "$publish_ip" 8767)" == "blocked" ]] \
+  || id42_die "a container on the default network reached the operator publisher"
+[[ "$(tcp_probe "${PROJECT}_default" "$web_store_ip" 8767)" == "blocked" ]] \
+  || id42_die "a container on the default network reached the operator forwarder"
+store_probe=$(ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
+  docker compose --env-file "$ENV_FILE" -f "$ROOT/docker-compose.yml" exec -T \
+  -e ID42_PROBE_HOST="$web_store_ip" -e ID42_PROBE_PORT=8767 \
+  nanobot-gateway /app/.venv/bin/python - <<'PY'
+import os, socket
+sock = socket.socket()
+sock.settimeout(3)
+try:
+    sock.connect((os.environ["ID42_PROBE_HOST"], int(os.environ["ID42_PROBE_PORT"])))
+except OSError:
+    print("blocked")
+else:
+    print("connected")
+PY
+)
+store_probe=${store_probe//$'\r'/}
+[[ "$store_probe" == "blocked" ]] \
+  || id42_die "the gateway reached the operator forwarder on the store network"
+
 ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   docker compose --env-file "$ENV_FILE" --profile id42-work-web -f "$ROOT/docker-compose.yml" \
-  stop id42-work-web >/dev/null
+  stop id42-work-web-publish id42-work-web >/dev/null
 echo "OK operator UI serves on loopback and lists the pending approval"
 
 approvals_cmd approve "$approve_approval" \
@@ -1640,6 +1828,10 @@ if ! grep -q "OK: id42-work storage config has no MCP server env to compare" "$W
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not report the absent storage config"
 fi
+if ! grep -q "OK: config.json does not contain inline secret values" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm that config.json omits inline secrets"
+fi
 if ! grep -q "OK: id42-work list_works is paged" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm paged list_works"
@@ -1740,8 +1932,19 @@ for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
         continue
     key, value = raw.split("=", 1)
     found[key] = value
-secrets = [found.get("ID42_WORK_DATABASE_URL", ""), found.get("ID42_POSTGRES_PASSWORD", "")]
-secrets = [item for item in secrets if item]
+secrets = []
+for key in (
+    "ID42_WORK_DATABASE_URL",
+    "ID42_POSTGRES_PASSWORD",
+    "NANOBOT_WEB_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "ODOO_API_KEY",
+    "GITHUB_TOKEN",
+    "ID42_WORK_WEB_TOKEN",
+):
+    value = found.get(key, "")
+    if value:
+        secrets.append(value)
 failed = False
 for name in sys.argv[2:]:
     text = Path(name).read_text(encoding="utf-8", errors="replace")
@@ -1830,6 +2033,11 @@ if [[ "$gw_ready" != "1" ]]; then
   id42_die "postgres-profile gateway did not become ready"
 fi
 
+pg_compose exec -T -u 1000 nanobot-gateway \
+  cat /home/nanobot/.nanobot/config.json >"$WORKDIR/pg-config.json"
+scan_secrets "$WORKDIR/pg-config.json"
+echo "OK postgres config.json does not contain the database secret"
+
 pg_run --entrypoint /app/.venv/bin/python nanobot-gateway - start-note "pg-approve-note" "pg-approve" \
   <"$ROOT/scripts/lib/mcp_probe.py" | tee "$WORKDIR/pg-approve-start.out"
 sed -i 's/\r$//' "$WORKDIR/pg-approve-start.out"
@@ -1914,6 +2122,7 @@ pg_rotated=$(auth_field signing_key_id "$WORKDIR/pg-rotate.out")
 pg_run --entrypoint /opt/id42-work/venv/bin/python \
   -e "PYTHONPATH=/opt/id42-agent" \
   nanobot-gateway - <<'PY' | tee "$WORKDIR/pg-files.out"
+import os
 import stat
 from pathlib import Path
 
@@ -1926,6 +2135,17 @@ if not key.is_file() or key.is_symlink():
 mode = stat.S_IMODE(key.stat().st_mode)
 if mode != 0o600:
     raise SystemExit(f"authority key mode is {mode:03o}")
+database = store / "secrets" / "database.url"
+if not database.is_file() or database.is_symlink():
+    raise SystemExit("database secret file is missing")
+database_mode = stat.S_IMODE(database.stat().st_mode)
+if database_mode != 0o600:
+    raise SystemExit(f"database secret file mode is {database_mode:03o}")
+if database.stat().st_uid != os.getuid():
+    raise SystemExit("database secret file owner is not the current user")
+expected = os.environ.get("ID42_WORK_DATABASE_URL", "").strip()
+if database.read_text(encoding="utf-8").strip() != expected:
+    raise SystemExit("database secret file does not match the configured URL")
 print("postgres-files-ok")
 PY
 sed -i 's/\r$//' "$WORKDIR/pg-files.out"
@@ -1947,6 +2167,10 @@ fi
 if ! grep -q "OK: id42-work storage config matches ID42_WORK_STORAGE" "$WORKDIR/pg-doctor.out"; then
   cat "$WORKDIR/pg-doctor.err" >&2
   id42_die "doctor did not confirm the postgres storage config"
+fi
+if ! grep -q "OK: config.json does not contain inline secret values" "$WORKDIR/pg-doctor.out"; then
+  cat "$WORKDIR/pg-doctor.err" >&2
+  id42_die "doctor did not confirm that the postgres config omits inline secrets"
 fi
 if ! grep -q "OK: postgres service publishes no host port" "$WORKDIR/pg-doctor.out"; then
   cat "$WORKDIR/pg-doctor.err" >&2
