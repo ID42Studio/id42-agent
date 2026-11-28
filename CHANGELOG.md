@@ -4,6 +4,7 @@
 
 ### Added
 
+- id42-work is pinned at `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`. The default factory passes `session_actor` so stdio keeps one sealed actor for the process, and HTTP sessions present a credential the authority verifies. `list_works` and `list_executions` are paged.
 - Optional Postgres storage for the default id42-work factory. SQLite remains the default.
   `ID42_WORK_STORAGE=postgres` and `ID42_WORK_DATABASE_URL` select `PostgresStorage`.
   The `postgres` Compose profile runs Postgres from credentials in `.env` and publishes

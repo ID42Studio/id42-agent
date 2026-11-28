@@ -242,6 +242,11 @@ then
   else
     bad "id42-work did not list echo, note, and note.list"
   fi
+  if grep -qx 'work_pages=3' "$probe_out"; then
+    good "id42-work list_works is paged"
+  else
+    bad "id42-work list_works did not page the three works"
+  fi
   good "id42-work MCP server answered on stdio"
 else
   bad "id42-work MCP server did not answer on stdio"
@@ -324,7 +329,7 @@ rm -f "$key_out"
 
 if [[ -n "$container_id" ]]; then
   # Keep in sync with the Dockerfile default for ID42_WORK_REF.
-  expected_pin=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
+  expected_pin=ae07623aa67c0b5d0535cb58f6a2e2b204736e50
   pin=$("${COMPOSE[@]}" exec -T -u 1000 nanobot-gateway /bin/sh -c 'cat /opt/id42-agent/ID42_WORK_REF' 2>/dev/null || true)
   pin=${pin//$'\r'/}
   pin=${pin//$'\n'/}

@@ -2,16 +2,16 @@
 
 The gateway can start [id42-work](https://github.com/ID42Studio/id42-work) as an MCP server. The server is a child process of the gateway. It speaks stdio. It does not open a port.
 
-The package is `id42-work[mcp,postgres]` at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. PyPI publishing is not used. The image installs it from git:
+The package is `id42-work[mcp,postgres]` at commit `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`. PyPI publishing is not used. The image installs it from git:
 
 ```text
-id42-work[mcp,postgres] @ git+https://github.com/ID42Studio/id42-work.git@d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
+id42-work[mcp,postgres] @ git+https://github.com/ID42Studio/id42-work.git@ae07623aa67c0b5d0535cb58f6a2e2b204736e50
 ```
 
 `make build` passes that commit as the build arg `ID42_WORK_REF`. Set the same name in the environment to build a different commit, then rebuild. Use a full commit SHA. A branch name moves.
 
 ```bash
-ID42_WORK_REF=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9 make build
+ID42_WORK_REF=ae07623aa67c0b5d0535cb58f6a2e2b204736e50 make build
 ```
 
 ## Why the virtualenv is separate
@@ -52,6 +52,10 @@ A later change to `ID42_WORK_ENABLED` in `.env` does not rewrite an existing `co
 | `note` | `1.0.0` | Appends one note. Calls side-effecting `notes.append`. | `SUPERVISED`. The action waits for approval. Pass an `idempotency_key`. |
 
 The actor id is `id42-agent`, tenant `local`. That actor holds `notes.read` and `notes.append`. It does not hold `approve:note` or `reconcile:note`. A supervised side effect therefore returns `WAITING_APPROVAL`. `resume_execution` does not decide an approval, and it does not let the client mark a call applied.
+
+The factory passes `session_actor` so an HTTP session can present `Id42-Actor-Credential`. The server verifies that seal with the authority key and pins the first identity of the session. A later credential for a different actor in that session is refused. Stdio has no header, so the fallback is `issue_actor`: one sealed actor for the process. `host_actor()` stays that factory actor. `id42-work approvals --resume` and `id42-work reconcile` still continue as that actor, not as a session credential.
+
+`list_works` and `list_executions` return one page. `limit` defaults to 50 and cannot exceed 100. `next_cursor` is null on the last page. The cursor is opaque (`id42c1.`) and is not a capability. The server still checks the actor before reading the next page.
 
 Notes are one JSON object per line in `/var/lib/id42-work/notes.jsonl`, next to the SQLite file. With Postgres they stay in that same directory on `id42-work-data`. Each new line stores `operation_id`, the capability call's idempotency key, with `text` and `byte_count`. A line that only has `text` is still listed. It cannot prove a later append. The file stops accepting new notes at 1 MiB. Each note is 1 to 2000 non-blank characters. `note.list` takes `limit` from 1 to 50 and defaults to 20. `echo` accepts up to 4000 characters.
 
@@ -218,7 +222,7 @@ The action id for `note` is `append-note`. The command is not an MCP tool.
 
 ## Gaps in id42-work
 
-Left as they are at commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`:
+Left as they are at commit `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`:
 
 - No approve, reject, or reconcile tool on the MCP server. The CLIs above are the decision path. This repository does not add a WebUI for them.
 - Choosing Postgres does not move the note file or the authority key off `id42-work-data`.
@@ -267,6 +271,6 @@ Rebuild the image instead of mounting when the factory should travel with the im
 
 ## Checks
 
-`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, reports the storage backend, and opens it. SQLite is the usual line. Postgres must accept a connection, and a running Postgres container must not publish a host port. The URL is not printed. It then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9`. It checks the authority key file: absent is accepted, because the factory creates it mode `0600` on first use; a file that exists must be a regular file, mode `0600`, owned by the gateway user, and not a symlink. The directory must not be writable by others. When `config.json` names `id42-work`, its `ID42_WORK_AUTHORITY_KEY_PATH` must match the path the operator scripts use. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
+`make doctor` prepares `/var/lib/id42-work` for uid 1000, checks that the directory is writable and a separate mount, reports the storage backend, and opens it. SQLite is the usual line. Postgres must accept a connection, and a running Postgres container must not publish a host port. The URL is not printed. It then runs `id42-work mcp serve` against `id42_agent.mcp_host:server`. The probe sends `initialize` and `tools/list`, calls `list_works` with `limit` 1, follows `next_cursor`, and requires `echo`, `note`, and `note.list`. It reads `/opt/id42-agent/ID42_WORK_REF` and requires commit `ae07623aa67c0b5d0535cb58f6a2e2b204736e50`. It checks the authority key file: absent is accepted, because the factory creates it mode `0600` on first use; a file that exists must be a regular file, mode `0600`, owned by the gateway user, and not a symlink. The directory must not be writable by others. When `config.json` names `id42-work`, its `ID42_WORK_AUTHORITY_KEY_PATH` must match the path the operator scripts use. It also requires `id42-work approvals approve --help` to offer `--factory`, `--actor`, `--reason`, and `--resume`, and `id42-work reconcile abandon --help` to offer `--factory`, `--actor`, and `--reason`. When the gateway is up, it checks that `config.json` either omits `id42-work` or describes the stdio command above. A `url`, a non-stdio `type`, or `--http` fails the check.
 
 The smoke test renders an enabled config, asks nanobot in the image to load it, runs the same stdio probe, and probes the stub factory. It then starts an `echo` execution and a `note` execution, restarts the gateway, and requires both ids to still be listed. `echo` is `COMPLETED`. `note` is still `WAITING_APPROVAL`. It starts further `note` executions, lists them with `id42-work approvals list`, approves one with `--resume` and requires `COMPLETED`, and rejects another and requires `REJECTED`. A second decision on the approved id is refused. `scripts/work-approve.sh approve` is checked the same way, because that script adds `--resume` itself. It starts one more note in an MCP process, stops that process, and has a second process approve it and keep the operator credential without printing it. A new MCP process then reads the completed execution. A third process verifies the credential and the stored grant. `scripts/work-rotate-key.sh` changes the signing key id, and the earlier credential still verifies. A key file changed to mode `0644` is refused by `ActorAuthority` and by a new MCP process. Restoring mode `0600` lets the server start again. It then leaves three `note` calls `UNCERTAIN`: one after the line was stored, one before any line was stored, and one to abandon. A corrupt note file stays `UNCERTAIN`. After the file is repaired, resume completes the stored note once. Resume of the missing note waits for approval again, and one approval writes one line. `scripts/work-reconcile.sh abandon` leaves the third call `FAILED`. The execution actor is refused. `resume` does not open that execution again. It then starts the `postgres` profile in a second Compose project, approves one note from another process, abandons one uncertain note with `scripts/work-reconcile.sh`, rotates the authority key, and requires doctor to report postgres without printing the database URL. The SQLite file is not created for that run. On each backend it also SIGKILLs `notes.append` after the line is stored and before it is stored, and SIGKILLs once the execution is `VALIDATING`. Resume of a readable file probes `APPLIED` or `NOT_APPLIED`. An unreadable file becomes `UNCERTAIN` and `scripts/work-reconcile.sh applied` or `not-applied` resolves it. Validation recovery does not append again.

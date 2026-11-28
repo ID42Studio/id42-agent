@@ -14,7 +14,7 @@ ENV PYTHONPATH=/opt/id42-agent
 ENV ID42_WORK_VENV=/opt/id42-work/venv
 
 # Full commit of ID42Studio/id42-work. Override with --build-arg ID42_WORK_REF.
-ARG ID42_WORK_REF=d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9
+ARG ID42_WORK_REF=ae07623aa67c0b5d0535cb58f6a2e2b204736e50
 
 RUN set -eu; \
     case "$ID42_WORK_REF" in \

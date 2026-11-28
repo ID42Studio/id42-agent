@@ -11,7 +11,7 @@ This repository does not fork the agent. It pins one upstream commit, builds tha
 | Upstream | `HKUDS/nanobot` |
 | Release | `v0.4.2` |
 | Commit | `0dc8679edcc6061fbcdf3de13c7e16000e9d1b65` |
-| ID42 Work | `d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9` (`id42-work[mcp,postgres]`) |
+| ID42 Work | `ae07623aa67c0b5d0535cb58f6a2e2b204736e50` (`id42-work[mcp,postgres]`) |
 
 Do not track `main`. There is no official published image. Compose builds the upstream Dockerfile with `NANOBOT_CHANNELS=telegram`, then installs the pinned id42-work commit into a separate virtualenv. Override that commit with the build arg `ID42_WORK_REF`.
 

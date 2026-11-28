@@ -51,6 +51,14 @@ command and the reconcile command load this same factory, so they seal
 ``OPERATOR_ID`` with the same keys. A credential issued in one process
 verifies in the next. This module does not seal the operator. Each
 command does, with only the grant that decision needs.
+
+The MCP server passes ``session_actor=credential_session_actor`` with
+this factory's ``issue`` as the fallback. Stdio has no credential header,
+so every stdio call is that one sealed actor, and the server pins the
+identity for the process. HTTP requires ``Id42-Actor-Credential`` and
+pins the first verified identity of each session. ``host_actor`` stays
+the factory actor, which is what ``--resume`` uses. Listing tools return
+one page (``limit`` and ``cursor``).
 """
 
 from __future__ import annotations
@@ -87,7 +95,7 @@ from id42_work import (
     WorkRunner,
     authority_key_path_from_env,
 )
-from id42_work.mcp import WorkMcpServer
+from id42_work.mcp import WorkMcpServer, credential_session_actor
 from pydantic import BaseModel, Field, JsonValue
 
 STORE_DIRECTORY = Path("/var/lib/id42-work")
@@ -715,11 +723,21 @@ def _close_storage(storage: _Closable) -> None:
 
 
 def server() -> WorkMcpServer:
-    """Host factory. The sealed actor is issued here, not by the MCP client."""
+    """Host factory. The sealed actor is issued here, not by the MCP client.
+
+    Stdio keeps one process actor. ``credential_session_actor`` falls back to
+    ``issue`` when the transport has no header, and the server pins that
+    identity. An HTTP caller must present a credential this authority verifies.
+    """
     runner, authority, storage = open_host()
     atexit.register(_close_storage, storage)
 
     def issue() -> TrustedActor:
         return issue_agent(authority)
 
-    return WorkMcpServer(runner, authority=authority, issue_actor=issue)
+    return WorkMcpServer(
+        runner,
+        authority=authority,
+        issue_actor=issue,
+        session_actor=credential_session_actor(fallback=issue),
+    )

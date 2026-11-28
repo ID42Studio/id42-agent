@@ -621,6 +621,8 @@ ID42_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT \
   nanobot-gateway - persist-check "$echo_id" "$note_id" <"$ROOT/scripts/lib/mcp_probe.py" \
   | tee "$WORKDIR/persist-check.out"
 grep -q "persist-ok" "$WORKDIR/persist-check.out"
+grep -q "execution_pages=2" "$WORKDIR/persist-check.out" \
+  || id42_die "list_executions did not return one page per execution"
 echo "OK id42-work executions are still listed after a gateway restart"
 
 echo "== id42-work native approvals =="
@@ -1411,11 +1413,15 @@ if ! grep -q "OK: id42-work storage config has no MCP server env to compare" "$W
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not report the absent storage config"
 fi
+if ! grep -q "OK: id42-work list_works is paged" "$WORKDIR/doctor.out"; then
+  cat "$WORKDIR/doctor.err" >&2
+  id42_die "doctor did not confirm paged list_works"
+fi
 if ! grep -q "OK: id42-work lists echo, note, and note.list" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the default works"
 fi
-if ! grep -q "OK: id42-work pin is d3be75dceb1ebfd7c6832f61fa905dd27dbfb4f9" "$WORKDIR/doctor.out"; then
+if ! grep -q "OK: id42-work pin is ae07623aa67c0b5d0535cb58f6a2e2b204736e50" "$WORKDIR/doctor.out"; then
   cat "$WORKDIR/doctor.err" >&2
   id42_die "doctor did not confirm the id42-work pin"
 fi

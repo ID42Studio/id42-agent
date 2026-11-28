@@ -237,6 +237,37 @@ def _work_ids(payload: Mapping[str, object], session: _Session) -> list[str]:
     return ids
 
 
+def _collect_pages(
+    session: _Session,
+    tool: str,
+    item_key: str,
+    arguments: Mapping[str, object],
+) -> tuple[list[object], int]:
+    """Read every page. ``limit`` in ``arguments`` is the page size."""
+    cursor: object = None
+    pages = 0
+    items: list[object] = []
+    seen: set[str] = set()
+    while True:
+        args = dict(arguments)
+        if isinstance(cursor, str):
+            args["cursor"] = cursor
+        payload = session.tool(tool, args)
+        chunk = payload.get(item_key)
+        if not isinstance(chunk, list):
+            session.fail(f"{tool} returned no {item_key} list")
+        items.extend(chunk)
+        pages += 1
+        cursor = payload.get("next_cursor")
+        if cursor is None:
+            return items, pages
+        if not isinstance(cursor, str) or not cursor.startswith("id42c1.") or cursor in seen:
+            session.fail(f"{tool} returned an invalid cursor")
+        seen.add(cursor)
+        if pages > 100:
+            session.fail(f"{tool} did not finish paging")
+
+
 def _require_default_works(ids: list[str], session: _Session) -> None:
     if _FACTORY != _DEFAULT_FACTORY:
         return
@@ -260,10 +291,11 @@ def probe() -> None:
         missing = [name for name in _EXPECTED_TOOLS if name not in names]
         if missing:
             session.fail(f"tools/list missing {', '.join(missing)}")
-        payload = session.tool("list_works", {})
-        ids = _work_ids(payload, session)
+        works, pages = _collect_pages(session, "list_works", "works", {"limit": 1})
+        ids = _work_ids({"works": works}, session)
         _require_default_works(ids, session)
         print("works=" + ",".join(sorted(ids)))
+        print(f"work_pages={pages}")
     except (TimeoutError, OSError, BrokenPipeError) as exc:
         session.fail(str(exc))
     finally:
@@ -418,10 +450,9 @@ def persist_check(echo_id: str, note_id: str) -> None:
     session = _Session()
     try:
         session.initialize()
-        payload = session.tool("list_executions", {})
-        executions = payload.get("executions")
-        if not isinstance(executions, list):
-            session.fail("list_executions returned no executions list")
+        executions, pages = _collect_pages(
+            session, "list_executions", "executions", {"limit": 1}
+        )
         by_id: dict[str, dict[str, object]] = {}
         for item in executions:
             if isinstance(item, dict) and isinstance(item.get("execution_id"), str):
@@ -434,10 +465,13 @@ def persist_check(echo_id: str, note_id: str) -> None:
             session.fail(f"echo execution did not survive: {echo.get('status')!r}")
         if note.get("work_id") != "note" or note.get("status") != "WAITING_APPROVAL":
             session.fail(f"note execution did not survive: {note.get('status')!r}")
+        if pages < 2:
+            session.fail(f"list_executions returned {pages} page(s) for two executions")
     except (TimeoutError, OSError, BrokenPipeError) as exc:
         session.fail(str(exc))
     finally:
         session.close()
+    print(f"execution_pages={pages}")
     print("persist-ok")
 
 
