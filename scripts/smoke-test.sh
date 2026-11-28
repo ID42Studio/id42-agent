@@ -953,7 +953,7 @@ if [[ "$web_health" != "healthy" ]]; then
   id42_die "operator UI did not become healthy"
 fi
 web_bind=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if eq $p "8767/tcp"}}{{range $conf}}{{.HostIp}}{{end}}{{end}}{{end}}' "$publish_id")
-[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1"
+[[ "$web_bind" == "127.0.0.1" ]] || id42_die "operator UI is not published on 127.0.0.1 (bind=${web_bind:-empty})"
 web_published=$(docker inspect --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}published{{end}}{{end}}' "$web_id")
 [[ -z "$web_published" ]] || id42_die "operator UI application container publishes a host port"
 ID42_WORK_WEB_TOKEN=$web_token ID42_WORK_WEB_URL="http://127.0.0.1:${web_port}" \

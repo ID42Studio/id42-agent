@@ -306,10 +306,11 @@ networks:
   # Gateway, Postgres, Ollama, and the operator UI. Not the default network,
   # so a container attached only to the project default cannot route here.
   id42-store: {}
-  # Operator UI forwarder and its host publisher. internal keeps this bridge
-  # off the outside. The publisher's host port is the way in.
+  # Operator UI forwarder and its host publisher. This bridge is not the
+  # default network, so a container there cannot route to port 8767.
+  # It is not internal: Docker does not publish a host port on an internal
+  # network, and the host map is 127.0.0.1.
   id42-operator:
-    internal: true
     ipam:
       config:
         - subnet: ${ID42_OPERATOR_SUBNET:-10.42.76.0/24}
