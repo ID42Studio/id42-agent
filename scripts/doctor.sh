@@ -46,13 +46,15 @@ if ! python3 "$CONFIG_PY" summary --env-file "$ENV_FILE"; then
   bad ".env could not be parsed"
 fi
 
-if ! "${COMPOSE[@]}" config --format json >/tmp/id42-compose-config.json; then
+compose_config=$(mktemp)
+if ! "${COMPOSE[@]}" config --format json >"$compose_config"; then
   bad "docker compose config rejected docker-compose.yml"
+  rm -f "$compose_config"
 else
   good "docker compose config accepted the file"
-  if ! python3 - "$ROOT/docker-compose.yml" <<'PY'
+  if ! python3 - "$compose_config" <<'PY'
 import json, sys
-doc = json.load(open("/tmp/id42-compose-config.json"))
+doc = json.load(open(sys.argv[1]))
 services = doc.get("services") or {}
 gateway = services.get("nanobot-gateway") or {}
 ports = gateway.get("ports") or []
@@ -81,6 +83,7 @@ PY
   else
     good "compose publishes 8765 and 18790 on loopback only"
   fi
+  rm -f "$compose_config"
 fi
 
 container_id=$("${COMPOSE[@]}" ps -q nanobot-gateway 2>/dev/null || true)
@@ -124,45 +127,109 @@ fi
 store_out=$(mktemp)
 if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \
   --entrypoint /opt/id42-work/venv/bin/python \
+  -e "PYTHONPATH=/opt/id42-agent" \
   nanobot-gateway - <<'PY' | tee "$store_out"
+import json
 import os
 from pathlib import Path
 
+import id42_agent.mcp_host as host
+
 store = Path("/var/lib/id42-work")
 if not store.is_dir() or not os.access(store, os.W_OK | os.X_OK):
-    raise SystemExit("id42-work store is not writable")
+    print("store-mount: id42-work store is not writable")
+    raise SystemExit(1)
 # A named volume has a different device from the container root filesystem.
 if store.stat().st_dev == store.parent.stat().st_dev:
-    raise SystemExit("id42-work store is not a separate mount")
+    print("store-mount: id42-work store is not a separate mount")
+    raise SystemExit(1)
 probe = store / ".doctor-write-probe"
 probe.write_text("ok\n", encoding="utf-8")
 if probe.read_text(encoding="utf-8") != "ok\n":
-    raise SystemExit("id42-work store write did not read back")
+    print("store-mount: id42-work store write did not read back")
+    raise SystemExit(1)
 probe.unlink()
-from id42_work import SqliteStorage
+try:
+    backend, version = host.storage_status()
+except RuntimeError as exc:
+    print(f"store-backend: {exc}")
+    raise SystemExit(1) from None
+print(f"store-ok backend={backend} schema={version}")
 
-db = store / "work.sqlite"
-storage = SqliteStorage(db)
-version = storage.schema_version
-storage.close()
-for suffix in ("", "-wal", "-shm"):
-    extra = Path(str(db) + suffix)
-    if extra.exists():
-        os.chmod(extra, 0o600)
-if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-    raise SystemExit(f"id42-work sqlite schema is {version!r}")
-print(f"store-ok schema={version}")
+config_path = Path("/home/nanobot/.nanobot/config.json")
+if not config_path.is_file():
+    print("storage-config-absent")
+    raise SystemExit(0)
+document = json.loads(config_path.read_text(encoding="utf-8"))
+tools = document.get("tools") if isinstance(document, dict) else None
+servers = tools.get("mcpServers") if isinstance(tools, dict) else None
+server = servers.get("id42-work") if isinstance(servers, dict) else None
+if not isinstance(server, dict):
+    print("storage-config-absent")
+    raise SystemExit(0)
+extra = server.get("env") if isinstance(server.get("env"), dict) else {}
+configured = extra.get("ID42_WORK_STORAGE", "")
+configured_url = extra.get("ID42_WORK_DATABASE_URL", "")
+if not isinstance(configured, str) or not isinstance(configured_url, str):
+    print("store-backend: config storage settings are not strings")
+    raise SystemExit(1)
+configured = configured.strip().lower()
+configured_url = configured_url.strip()
+expected_url = os.environ.get("ID42_WORK_DATABASE_URL", "").strip() if backend == "postgres" else ""
+if backend == "sqlite":
+    aligned = configured in {"", "sqlite"} and not configured_url
+else:
+    aligned = configured == "postgres" and bool(configured_url) and configured_url == expected_url
+if not aligned:
+    print("store-backend: config.json storage does not match ID42_WORK_STORAGE")
+    raise SystemExit(1)
+print("storage-config-ok")
 PY
 then
-  if grep -q '^store-ok ' "$store_out"; then
+  sed -i 's/\r$//' "$store_out"
+  backend=$(sed -n 's/^store-ok backend=\([^ ]*\).*/\1/p' "$store_out")
+  if [[ "$backend" == "sqlite" ]]; then
+    good "id42-work storage backend is sqlite"
     good "id42-work store is writable, mounted, and opens SQLite"
+  elif [[ "$backend" == "postgres" ]]; then
+    good "id42-work storage backend is postgres"
+    good "id42-work postgres storage is reachable"
   else
-    bad "id42-work store check did not report store-ok"
+    bad "id42-work store check did not report a storage backend"
+  fi
+  if grep -qx 'storage-config-ok' "$store_out"; then
+    good "id42-work storage config matches ID42_WORK_STORAGE"
+  elif grep -qx 'storage-config-absent' "$store_out"; then
+    good "id42-work storage config has no MCP server env to compare"
+  else
+    bad "id42-work storage config check did not report a result"
   fi
 else
-  bad "id42-work store is not writable or not a persistent mount"
+  sed -i 's/\r$//' "$store_out" || true
+  if grep -q '^store-backend:' "$store_out"; then
+    bad "id42-work storage backend check failed"
+  else
+    bad "id42-work store is not writable or not a persistent mount"
+  fi
 fi
 rm -f "$store_out"
+
+pg_container=$("${COMPOSE[@]}" --profile postgres ps -q postgres 2>/dev/null || true)
+if [[ -n "$pg_container" ]]; then
+  if python3 - "$pg_container" <<'PY'
+import json, subprocess, sys
+info = json.loads(subprocess.check_output(["docker", "inspect", sys.argv[1]], text=True))[0]
+bindings = (info.get("HostConfig") or {}).get("PortBindings") or {}
+published = (info.get("NetworkSettings") or {}).get("Ports") or {}
+if bindings or any(value for value in published.values()):
+    raise SystemExit(1)
+PY
+  then
+    good "postgres service publishes no host port"
+  else
+    bad "postgres service publishes a host port"
+  fi
+fi
 
 probe_out=$(mktemp)
 if "${COMPOSE[@]}" run --rm --no-deps -T --user 1000 \

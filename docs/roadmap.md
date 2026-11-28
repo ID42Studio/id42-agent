@@ -12,14 +12,15 @@ This repository. One person, one machine.
 - Telegram long polling with a mandatory allowlist when enabled
 - Shell tool off, workspace restriction on
 - First-boot config that does not overwrite later WebUI edits
-- `id42-work[mcp]` installed in the image, attached over stdio only when `ID42_WORK_ENABLED=true`
-- `scripts/doctor.sh` and a CI smoke test that checks that the gateway becomes healthy and that `id42-work mcp serve` answers on stdio
+- `id42-work[mcp,postgres]` installed in the image, attached over stdio only when `ID42_WORK_ENABLED=true`
+- SQLite by default, with an optional `postgres` Compose profile
+- `scripts/doctor.sh` and a CI smoke test that checks that the gateway becomes healthy, that `id42-work mcp serve` answers on stdio, and that Postgres can take an approval and one reconciliation
 
-Out of this version: backup and restore, a standalone API, and Postgres.
+Out of this version: backup and restore, and a standalone API.
 
 ## v0.2 — governed agent
 
-The agent still decides what it wants to do. ID42 Work governs what is allowed to run. The stdio attachment is in the image. The default factory registers `echo`, `note.list`, and `note`, and stores executions in SQLite on `id42-work-data`. What is still open:
+The agent still decides what it wants to do. ID42 Work governs what is allowed to run. The stdio attachment is in the image. The default factory registers `echo`, `note.list`, and `note`. Executions are stored in SQLite on `id42-work-data`, or in Postgres when that profile is selected. What is still open:
 
 - Works and policies supplied by the operator, beyond those three. Set `ID42_WORK_FACTORY` to replace the default. `id42_agent.mcp_stub:server` keeps the empty in-memory server
 - A way to approve or reconcile from the WebUI. Decisions stay outside the MCP server. `scripts/work-approve.sh` runs `id42-work approvals` for the default factory. `scripts/work-reconcile.sh` runs `id42-work reconcile`. The note provider probes an uncertain append on resume. The server still has no approve, reject, or reconcile tool

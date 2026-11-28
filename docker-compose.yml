@@ -1,7 +1,7 @@
 # id42-agent.
 # Runtime: HKUDS/nanobot v0.4.2 at 0dc8679edcc6061fbcdf3de13c7e16000e9d1b65.
 # There is no official published image. Compose builds the upstream Dockerfile,
-# then Dockerfile installs id42-work[mcp] into a separate virtualenv.
+# then Dockerfile installs id42-work[mcp,postgres] into a separate virtualenv.
 # nanobot is MIT licensed. id42-work and this repository's own files are Apache-2.0.
 # See NOTICE.
 
@@ -23,11 +23,16 @@ x-nanobot: &nanobot
     TZ: ${TZ:-America/Sao_Paulo}
     NANOBOT_DOCKER_BOOTSTRAP: "1"
     NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
+    # Factory storage. sqlite is the default. postgres needs the profile below
+    # and ID42_WORK_DATABASE_URL. The URL is a secret; scripts must not print it.
+    ID42_WORK_STORAGE: ${ID42_WORK_STORAGE:-sqlite}
+    ID42_WORK_DATABASE_URL: ${ID42_WORK_DATABASE_URL:-}
   volumes:
     - nanobot-data:/home/nanobot/.nanobot
-    # SQLite store for the default id42-work factory. Outside the agent
-    # workspace and outside any home directory. File tools stay inside the
-    # workspace; the shell tool is off.
+    # Notes and the authority key for the default factory, plus the SQLite
+    # file when ID42_WORK_STORAGE is sqlite. Outside the agent workspace and
+    # outside any home directory. File tools stay inside the workspace; the
+    # shell tool is off. Postgres executions live on id42-postgres-data.
     - id42-work-data:/var/lib/id42-work
     - ./docker/entrypoint.sh:/id42/entrypoint.sh:ro
   extra_hosts:
@@ -70,6 +75,12 @@ services:
 
   nanobot-gateway:
     <<: *nanobot
+    # Optional. With the postgres profile active, wait until Postgres accepts
+    # connections. Without that profile the dependency is skipped.
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
     command: ["gateway"]
     restart: unless-stopped
     ports:
@@ -121,7 +132,39 @@ services:
           cpus: "2.0"
           memory: 8G
 
+  # Opt-in Postgres for the default id42-work factory.
+  # Enable with: docker compose --profile postgres up -d
+  # Set ID42_WORK_STORAGE=postgres and ID42_WORK_DATABASE_URL before the first
+  # init when the MCP server is enabled. Credentials come from the env file.
+  # This service publishes no host port. The authority key stays on
+  # id42-work-data, not in this database.
+  postgres:
+    profiles:
+      - postgres
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ID42_POSTGRES_USER:-}
+      POSTGRES_PASSWORD: ${ID42_POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${ID42_POSTGRES_DB:-}
+    volumes:
+      - id42-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
 volumes:
   nanobot-data:
   id42-work-data:
+  id42-postgres-data:
   ollama-data:

@@ -1,8 +1,11 @@
 """Default host factory for ``id42-work mcp serve``.
 
 The process that runs the command is the host. It registers three works and
-stores executions in SQLite on a dedicated directory, outside the agent
-workspace and outside any home directory:
+stores executions outside the agent workspace and outside any home directory.
+``ID42_WORK_STORAGE`` selects the backend. Empty or ``sqlite`` opens
+``SqliteStorage`` (the default). ``postgres`` opens ``PostgresStorage`` from
+the ``postgres`` extra, using ``ID42_WORK_DATABASE_URL``. The authority key
+file stays on the data volume either way:
 
 - ``echo`` returns its input. No capability, no approval.
 - ``note.list`` reads notes already stored. Read-only, no approval.
@@ -27,9 +30,11 @@ retries the same operation id and asks for approval again. The execution
 actor is not given ``reconcile:note``. ``id42-work reconcile`` seals that
 grant for ``OPERATOR_ID`` when an operator decides, and only that grant.
 
-The database file is ``/var/lib/id42-work/work.sqlite`` unless
+The SQLite file is ``/var/lib/id42-work/work.sqlite`` unless
 ``ID42_WORK_STORE`` is an absolute path outside ``/home`` and ``/root``.
-Compose mounts a named volume there. The file survives a container restart.
+``ID42_WORK_STORE`` is ignored when the backend is Postgres. Compose mounts
+a named volume at ``/var/lib/id42-work``. That directory holds the note file
+and the authority key for both backends, and the SQLite file for the default.
 ``id42_agent.mcp_stub:server`` is the empty in-memory factory. It does not
 use this key file.
 
@@ -54,9 +59,12 @@ import atexit
 import fcntl
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from pathlib import Path
+from typing import Protocol
+from urllib.parse import urlparse
 
 from id42_work import (
     ActorAuthority,
@@ -72,6 +80,7 @@ from id42_work import (
     ReconciliationVerdict,
     SqliteStorage,
     StaticPolicyResolver,
+    StorageError,
     TrustedActor,
     Work,
     WorkRegistry,
@@ -83,6 +92,12 @@ from pydantic import BaseModel, Field, JsonValue
 
 STORE_DIRECTORY = Path("/var/lib/id42-work")
 DEFAULT_STORE = STORE_DIRECTORY / "work.sqlite"
+STORAGE_SQLITE = "sqlite"
+STORAGE_POSTGRES = "postgres"
+_STORAGE_ENV = "ID42_WORK_STORAGE"
+_DATABASE_ENV = "ID42_WORK_DATABASE_URL"
+_DSN_USERINFO = re.compile(r"://[^/\s@]*:[^/\s@]*@")
+_DSN_PASSWORD = re.compile(r"(?i)\bpassword\s*=\s*('[^']*'|\"[^\"]*\"|\S+)")
 # One file for the MCP server and for `id42-work approvals` / `reconcile`.
 # Keep the shell default in scripts/lib/common.sh in sync with this path.
 DEFAULT_AUTHORITY_KEY = STORE_DIRECTORY / "authority.key"
@@ -111,6 +126,14 @@ if OPERATOR_ID == ACTOR_ID or any(
     raise RuntimeError("the execution actor must not approve or reconcile its own work")
 _FORBIDDEN_ROOTS = (Path("/home"), Path("/root"))
 _LIMITS = ExecutionLimits(timeout=timedelta(seconds=30))
+_POSTGRES_TIMEOUT_SECONDS = 10.0
+
+
+class _Closable(Protocol):
+    @property
+    def schema_version(self) -> int: ...
+
+    def close(self) -> None: ...
 
 
 class EchoInput(BaseModel):
@@ -342,6 +365,140 @@ def store_file() -> Path:
     return resolved
 
 
+def storage_backend() -> str:
+    """``sqlite`` or ``postgres``. An empty value is SQLite."""
+    raw = os.environ.get(_STORAGE_ENV, "").strip().lower()
+    if raw in {"", STORAGE_SQLITE}:
+        return STORAGE_SQLITE
+    if raw == STORAGE_POSTGRES:
+        return STORAGE_POSTGRES
+    raise RuntimeError("ID42_WORK_STORAGE must be sqlite or postgres")
+
+
+def _database_url_error(value: str) -> str | None:
+    """Return an error when ``value`` is not a Postgres target, else None.
+
+    The message does not include the value. A URL must not contain whitespace.
+    A libpq connection string may. A socket path under ``/home`` or ``/root``
+    is refused.
+    """
+    if not value:
+        return "ID42_WORK_DATABASE_URL is required when ID42_WORK_STORAGE=postgres"
+    if any(char in value for char in "\r\n"):
+        return "ID42_WORK_DATABASE_URL must be a single line"
+    if "://" in value:
+        if any(char.isspace() for char in value):
+            return "ID42_WORK_DATABASE_URL must be a postgres URL or a libpq connection string"
+        parsed = urlparse(value)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            return "ID42_WORK_DATABASE_URL must name a postgres host"
+        return None
+    hosts: list[str] = []
+    for part in value.split():
+        if "=" not in part:
+            return "ID42_WORK_DATABASE_URL must be a postgres URL or a libpq connection string"
+        key, _, raw = part.partition("=")
+        if key.lower() in {"host", "hostaddr"}:
+            hosts.append(raw.strip("'\""))
+    if not hosts:
+        return "ID42_WORK_DATABASE_URL must name a postgres host"
+    for host in hosts:
+        path = Path(host)
+        if path.is_absolute():
+            try:
+                _reject_home(path, "ID42_WORK_DATABASE_URL must not use a socket under /home or /root")
+            except RuntimeError:
+                return "ID42_WORK_DATABASE_URL must not use a socket under /home or /root"
+    return None
+
+
+def database_url() -> str:
+    """Postgres target from the environment. The value is not logged."""
+    raw = os.environ.get(_DATABASE_ENV, "").strip()
+    error = _database_url_error(raw)
+    if error:
+        raise RuntimeError(error)
+    return raw
+
+
+def _public_storage_error(exc: BaseException) -> str:
+    """Describe a storage failure without the URL or its password."""
+    text = str(exc)
+    url = os.environ.get(_DATABASE_ENV, "").strip()
+    if url:
+        text = text.replace(url, "[redacted]")
+        password = urlparse(url).password if "://" in url else None
+        if password:
+            text = text.replace(password, "[redacted]")
+    text = _DSN_USERINFO.sub("://[redacted]@", text)
+    text = _DSN_PASSWORD.sub("password=[redacted]", text)
+    text = " ".join(text.split())
+    if not text:
+        text = "cannot open postgres storage"
+    return text[:300]
+
+
+def _prepare_directory(directory: Path) -> None:
+    """Create a store directory. chmod only a directory this process created."""
+    created = not directory.exists()
+    directory.mkdir(parents=True, exist_ok=True)
+    if created:
+        os.chmod(directory, 0o700)
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise RuntimeError(f"id42-work store is not writable: {directory}")
+
+
+def _open_postgres() -> _Closable:
+    error = _database_url_error(os.environ.get(_DATABASE_ENV, "").strip())
+    if error:
+        raise RuntimeError(error)
+    try:
+        from id42_work.storage.postgres import PostgresStorage
+    except ImportError as exc:
+        raise RuntimeError(
+            "postgres storage needs id42-work[postgres] in /opt/id42-work/venv"
+        ) from exc
+    try:
+        return PostgresStorage(database_url(), timeout=_POSTGRES_TIMEOUT_SECONDS)
+    except StorageError as exc:
+        raise RuntimeError(_public_storage_error(exc)) from None
+
+
+def open_storage() -> _Closable:
+    """Open the backend selected by ``ID42_WORK_STORAGE``. The caller closes it."""
+    if storage_backend() == STORAGE_SQLITE:
+        path = store_file()
+        _prepare_directory(path.parent)
+        storage = SqliteStorage(path)
+        _mode_600_db(path)
+        return storage
+    _prepare_directory(STORE_DIRECTORY)
+    return _open_postgres()
+
+
+def storage_status() -> tuple[str, int]:
+    """Open the selected backend, read its schema version, and close it.
+
+    The result is ``(backend, schema_version)``. A connection failure raises
+    ``RuntimeError`` and does not include the database URL.
+    """
+    kind = storage_backend()
+    storage = open_storage()
+    try:
+        version = storage.schema_version
+    except Exception as exc:
+        if kind == STORAGE_POSTGRES:
+            raise RuntimeError(_public_storage_error(exc)) from None
+        raise
+    finally:
+        storage.close()
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise RuntimeError(f"id42-work schema is {version!r}")
+    if kind == STORAGE_SQLITE:
+        _mode_600_db(store_file())
+    return kind, version
+
+
 def authority_key_file() -> Path:
     """Absolute path of the HMAC key file. An unset env uses the volume default.
 
@@ -422,8 +579,12 @@ def rotate_authority_key() -> str:
 
 
 def notes_file(db_path: Path | None = None) -> Path:
-    """JSONL notes next to the SQLite file."""
-    return (db_path or store_file()).parent / NOTES_NAME
+    """JSONL notes next to the SQLite file, or in the store directory for Postgres."""
+    if db_path is not None:
+        return db_path.parent / NOTES_NAME
+    if storage_backend() == STORAGE_SQLITE:
+        return store_file().parent / NOTES_NAME
+    return STORE_DIRECTORY / NOTES_NAME
 
 
 def issue_agent(authority: ActorAuthority) -> TrustedActor:
@@ -515,25 +676,18 @@ def _works() -> tuple[tuple[Work, object], ...]:
     )
 
 
-def open_host() -> tuple[WorkRunner, ActorAuthority, SqliteStorage]:
+def open_host() -> tuple[WorkRunner, ActorAuthority, _Closable]:
     """Open the durable runner. The caller closes the storage."""
-    path = store_file()
-    # chmod only a directory this process created. The volume root is mode 700
-    # from the image and the entrypoint; chmod of an existing parent would
-    # also hit shared directories such as /tmp when ID42_WORK_STORE is a file there.
-    created = not path.parent.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if created:
-        os.chmod(path.parent, 0o700)
-    if not os.access(path.parent, os.W_OK | os.X_OK):
-        raise RuntimeError(f"id42-work store is not writable: {path.parent}")
-    storage = SqliteStorage(path)
-    _mode_600_db(path)
+    if storage_backend() == STORAGE_SQLITE:
+        notes = notes_file(store_file())
+    else:
+        notes = STORE_DIRECTORY / NOTES_NAME
+    storage = open_storage()
     registry = WorkRegistry()
     for work, executor in _works():
         registry.register(work, executor=executor)
     capabilities = CapabilityRegistry()
-    capabilities.add(NoteStore(notes_file(path)))
+    capabilities.add(NoteStore(notes))
     authority = open_authority(create=True)
     runner = WorkRunner(
         registry=registry,
@@ -556,7 +710,7 @@ def _mode_600_db(path: Path) -> None:
         _mode_600(Path(str(path) + suffix))
 
 
-def _close_storage(storage: SqliteStorage) -> None:
+def _close_storage(storage: _Closable) -> None:
     storage.close()
 
 
